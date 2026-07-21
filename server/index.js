@@ -160,7 +160,7 @@ async function parseJluPdfSchedule (buffer) {
 }
 
 db.exec(`
-  CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, student_id TEXT UNIQUE NOT NULL, name TEXT NOT NULL, phone TEXT NOT NULL, college TEXT NOT NULL, class TEXT NOT NULL, password TEXT NOT NULL, avatar TEXT DEFAULT '🌿', bio TEXT DEFAULT '', agent_name TEXT DEFAULT '知行', agent_avatar TEXT DEFAULT '✦', model_type TEXT DEFAULT 'deepseek', api_key TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')));
+  CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, student_id TEXT UNIQUE NOT NULL, name TEXT NOT NULL, phone TEXT NOT NULL, college TEXT NOT NULL, class TEXT NOT NULL, password TEXT NOT NULL, role TEXT DEFAULT 'student', avatar TEXT DEFAULT '🌿', bio TEXT DEFAULT '', agent_name TEXT DEFAULT '知行', agent_avatar TEXT DEFAULT '✦', model_type TEXT DEFAULT 'deepseek', api_key TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS courses (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, teacher TEXT, color TEXT DEFAULT '#d97745');
   CREATE TABLE IF NOT EXISTS resources (id INTEGER PRIMARY KEY AUTOINCREMENT, course_id INTEGER, title TEXT NOT NULL, description TEXT DEFAULT '', type TEXT DEFAULT 'note', tags TEXT DEFAULT '', url TEXT DEFAULT '', uploader_id INTEGER, created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS schedules (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, course_name TEXT NOT NULL, weekday INTEGER NOT NULL, start_time TEXT NOT NULL, end_time TEXT NOT NULL, location TEXT DEFAULT '', color TEXT DEFAULT '#d97745');
@@ -184,6 +184,7 @@ for (const column of [
   "ALTER TABLE schedules ADD COLUMN weeks TEXT DEFAULT '1-16'",
   "ALTER TABLE schedules ADD COLUMN semester_start TEXT DEFAULT ''",
   "ALTER TABLE schedules ADD COLUMN semester_key TEXT DEFAULT ''",
+  "ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'student'",
   "ALTER TABLE users ADD COLUMN avatar TEXT DEFAULT '🌿'",
   "ALTER TABLE users ADD COLUMN bio TEXT DEFAULT ''",
   "ALTER TABLE users ADD COLUMN agent_name TEXT DEFAULT '知行'",
@@ -205,11 +206,14 @@ function encryptSecret(value) { const iv=crypto.randomBytes(12), cipher=crypto.c
 function decryptSecret(value) { if (!value || !value.startsWith('v1:')) return value||''; const [,iv,tag,data]=value.split(':'), decipher=crypto.createDecipheriv('aes-256-gcm',keyMaterial(),Buffer.from(iv,'base64')); decipher.setAuthTag(Buffer.from(tag,'base64')); return Buffer.concat([decipher.update(Buffer.from(data,'base64')),decipher.final()]).toString('utf8') }
 function auth(req,res,next) { const header=req.headers.authorization||''; if(!header.startsWith('Bearer ')) return res.status(401).json({error:'请先登录'}); try{req.user=jwt.verify(header.slice(7),JWT_SECRET);next()}catch{return res.status(401).json({error:'登录已过期，请重新登录'})} }
 const userOf=id=>db.prepare('SELECT * FROM users WHERE id=?').get(id)
-const publicUser=row=>row&&({id:row.id,student_id:row.student_id,name:row.name,college:row.college,class:row.class,avatar:row.avatar||'🌿',bio:row.bio||'',agent_name:row.agent_name||'知行',agent_avatar:row.agent_avatar||'✦',model_type:row.model_type,hasApiKey:!!row.api_key})
+const publicUser=row=>row&&({id:row.id,student_id:row.student_id,name:row.name,college:row.college,class:row.class,avatar:row.avatar||'🌿',bio:row.bio||'',agent_name:row.agent_name||'知行',agent_avatar:row.agent_avatar||'✦',model_type:row.model_type,hasApiKey:!!row.api_key,is_admin:row.role==='admin'})
 const member=(id,userId)=>!!db.prepare('SELECT 1 FROM conversation_members WHERE conversation_id=? AND user_id=?').get(id,userId)
 const conversationOf=id=>db.prepare('SELECT * FROM conversations WHERE id=?').get(id)
 const ownerOf=(id,userId)=>!!db.prepare('SELECT 1 FROM conversations WHERE id=? AND owner_id=?').get(id,userId)
 const friends=(left,right)=>!!db.prepare('SELECT 1 FROM friendships WHERE user_id=? AND friend_id=?').get(left,right)
+const isAdmin=userId=>userOf(userId)?.role==='admin'
+function bootstrapAdmin () { const studentId=(process.env.ADMIN_STUDENT_ID||'').trim(),password=process.env.ADMIN_PASSWORD||''; if(!studentId)return; const existing=db.prepare('SELECT id FROM users WHERE student_id=?').get(studentId); if(existing){db.prepare("UPDATE users SET role='admin' WHERE id=?").run(existing.id);return} if(!password)return; db.prepare("INSERT INTO users (student_id,name,phone,college,class,password,role) VALUES (?,?,?,?,?,?, 'admin')").run(studentId,(process.env.ADMIN_NAME||'CampusMind 管理员').slice(0,40),'管理员',(process.env.ADMIN_COLLEGE||'CampusMind 平台').slice(0,60),'系统管理员',hashPassword(password)) }
+bootstrapAdmin()
 
 const app=express(); app.use(cors()); app.use(express.json({limit:'1mb'}))
 app.post('/api/register',(req,res)=>{const {student_id,name,phone,college,class:className,password}=req.body;if(![student_id,name,phone,college,className,password].every(Boolean))return res.status(400).json({error:'请填写所有必填信息'});if(!/^\d{8}$/.test(student_id))return res.status(400).json({error:'学号必须为 8 位数字'});try{db.prepare('INSERT INTO users (student_id,name,phone,college,class,password) VALUES (?,?,?,?,?,?)').run(student_id.trim(),name.trim(),phone.trim(),college.trim(),className.trim(),hashPassword(password));res.json({message:'注册成功，请登录'})}catch(e){res.status(e.message.includes('UNIQUE')?409:500).json({error:e.message.includes('UNIQUE')?'该学号已注册':'注册失败'})}})
@@ -303,6 +307,8 @@ app.get('/api/forum/posts',auth,(req,res)=>res.json(db.prepare('SELECT p.*,u.nam
 app.post('/api/forum/posts',auth,(req,res)=>{const {title,content,category='学习交流'}=req.body;if(!title||!content)return res.status(400).json({error:'请填写标题和正文'});const result=db.prepare('INSERT INTO forum_posts (author_id,category,title,content) VALUES (?,?,?,?)').run(req.user.id,category,title,content);res.status(201).json({id:result.lastInsertRowid})})
 app.get('/api/forum/posts/:id/comments',auth,(req,res)=>res.json(db.prepare('SELECT c.*,u.name author_name FROM forum_comments c JOIN users u ON u.id=c.author_id WHERE c.post_id=? ORDER BY c.id').all(req.params.id)))
 app.post('/api/forum/posts/:id/comments',auth,(req,res)=>{const content=(req.body.content||'').trim();if(!content)return res.status(400).json({error:'评论不能为空'});const result=db.prepare('INSERT INTO forum_comments (post_id,author_id,content) VALUES (?,?,?)').run(req.params.id,req.user.id,content);res.status(201).json({id:result.lastInsertRowid})})
+app.delete('/api/forum/posts/:id',auth,(req,res)=>{const post=db.prepare('SELECT * FROM forum_posts WHERE id=?').get(req.params.id);if(!post)return res.status(404).json({error:'帖子不存在'});if(post.author_id!==req.user.id&&!isAdmin(req.user.id))return res.status(403).json({error:'只能删除自己的帖子'});const remove=db.transaction(()=>{db.prepare('DELETE FROM forum_comments WHERE post_id=?').run(post.id);db.prepare('DELETE FROM forum_posts WHERE id=?').run(post.id)});remove();res.json({message:'帖子及其评论已删除'})})
+app.delete('/api/forum/comments/:id',auth,(req,res)=>{const comment=db.prepare('SELECT * FROM forum_comments WHERE id=?').get(req.params.id);if(!comment)return res.status(404).json({error:'评论不存在'});if(comment.author_id!==req.user.id&&!isAdmin(req.user.id))return res.status(403).json({error:'只能删除自己的评论'});db.prepare('DELETE FROM forum_comments WHERE id=?').run(comment.id);res.json({message:'评论已删除'})})
 
 function makeAgent(user) {
   const userId=user.id
