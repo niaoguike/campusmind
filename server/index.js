@@ -194,10 +194,13 @@ for (const column of [
 ]) {
   try { db.exec(column) } catch { /* Existing databases already have this column. */ }
 }
-if (!db.prepare('SELECT COUNT(*) count FROM courses').get().count) {
-  const add = db.prepare('INSERT INTO courses (name,teacher,color) VALUES (?,?,?)')
-  add.run('数据结构', '课程教师', '#c96d42'); add.run('高等数学', '课程教师', '#b05f72'); add.run('Python 程序设计', '课程教师', '#c69232')
-}
+const ensureCourse = db.prepare('INSERT INTO courses (name,teacher,color) SELECT ?,?,? WHERE NOT EXISTS (SELECT 1 FROM courses WHERE name=?)')
+for (const [name, teacher, color] of [
+  ['数据结构', '课程教师', '#c96d42'],
+  ['高等数学', '课程教师', '#b05f72'],
+  ['Python 程序设计', '课程教师', '#c69232'],
+  ['毛泽东思想和中国特色社会主义理论体系概论', '课程教师', '#9d5b48']
+]) ensureCourse.run(name, teacher, color, name)
 
 function hashPassword(value) { const salt=crypto.randomBytes(16).toString('hex'); return `scrypt$${salt}$${crypto.scryptSync(value,salt,64).toString('hex')}` }
 function passwordMatches(value, stored) { if (!stored.startsWith('scrypt$')) return value===stored; const [,salt,hash]=stored.split('$'); return crypto.timingSafeEqual(Buffer.from(hash,'hex'),crypto.scryptSync(value,salt,64)) }
