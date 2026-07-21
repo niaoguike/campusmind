@@ -1,0 +1,35 @@
+<template>
+  <div class="page"><AppNav /><main class="agent-page">
+    <aside class="threads panel">
+      <button class="primary wide" @click="newThread">＋ 新建学习对话</button>
+      <p class="label">我的专属 Agent</p>
+      <div class="agent-profile"><div class="agent-mark">✦</div><div><b>知行</b><small>学习教练 · LangChain</small></div></div>
+      <p class="hint">它能检索课程资料、读取你的课表与计划、生成待确认计划草稿，并记住你授权的学习偏好。</p>
+      <p class="label">近期对话</p>
+      <button v-for="thread in threads" :key="thread.id" class="thread" :class="{active: thread.id===threadId}" @click="openThread(thread.id)">{{ thread.title }}</button>
+    </aside>
+    <section class="chat panel">
+      <header><div><span class="eyebrow">PRIVATE LEARNING AGENT</span><h1>和你的学习伙伴一起进步</h1></div><span class="status">● 已连接 DeepSeek</span></header>
+      <div class="quick"><button @click="ask('帮我根据本周课表安排一个学习计划')">安排本周计划</button><button @click="ask('帮我找数据结构相关的复习资料')">检索课程资料</button><button @click="ask('请记住：我每天晚上 8 点后适合学习')">记录学习偏好</button></div>
+      <div ref="scrollBox" class="messages"><div v-if="!messages.length" class="empty"><div>✦</div><b>今天想从哪里开始？</b><p>可以问概念、寻找课程资料、梳理错题，或请我生成一份可编辑的学习计划。</p></div><article v-for="(message,index) in messages" :key="index" :class="['bubble',message.role]"><span>{{ message.role==='user'?'我':'知行' }}</span><p>{{ message.content }}</p></article><div v-if="loading" class="bubble assistant"><span>知行</span><p>正在思考并调用学习工具…</p></div></div>
+      <form @submit.prevent="send"><textarea v-model="input" placeholder="输入你的学习问题，Enter 发送，Shift + Enter 换行" :disabled="loading" @keydown.enter.exact.prevent="send"/><div><small>对话与学习数据仅限本人可见</small><button class="primary" :disabled="loading || !input.trim()">{{ loading?'思考中…':'发送 ↗' }}</button></div></form>
+    </section>
+  </main></div>
+</template>
+<script setup>
+import { nextTick, onMounted, ref } from 'vue'
+import { ElMessage } from 'element-plus'
+import AppNav from '../components/AppNav.vue'
+import { api, post } from '../utils/api'
+const threads=ref([]), threadId=ref(null), messages=ref([]), input=ref(''), loading=ref(false), scrollBox=ref(null)
+async function loadThreads(){threads.value=await api('/agent/threads');if(threads.value[0])openThread(threads.value[0].id)}
+async function openThread(id){threadId.value=id;messages.value=await api(`/agent/threads/${id}/messages`);scroll()}
+async function newThread(){const data=await post('/agent/threads',{});await loadThreads();await openThread(data.id)}
+function ask(text){input.value=text;send()}
+async function send(){const content=input.value.trim();if(!content||loading.value)return;loading.value=true;input.value='';messages.value.push({role:'user',content});scroll();try{const data=await post('/agent/chat',{thread_id:threadId.value,content});threadId.value=data.thread_id;messages.value.push({role:'assistant',content:data.answer});await loadThreads()}catch(e){ElMessage.error(e.message);messages.value.pop()}finally{loading.value=false;scroll()}}
+function scroll(){nextTick(()=>{if(scrollBox.value)scrollBox.value.scrollTop=scrollBox.value.scrollHeight})}
+onMounted(()=>loadThreads().catch(e=>ElMessage.error(e.message)))
+</script>
+<style scoped>
+.agent-page{max-width:1360px;margin:auto;padding:28px 5vw;display:grid;grid-template-columns:280px 1fr;gap:20px;min-height:calc(100vh - 72px)}.panel{background:#fffdfa;border:1px solid #f1e2d8;border-radius:24px;box-shadow:0 10px 30px #9f4c2b0d}.threads{padding:18px}.wide{width:100%}.primary{background:#c96d42;color:white;border:0;border-radius:14px;padding:11px 17px;font-weight:700;cursor:pointer}.label{font-size:11px;color:#a68779;font-weight:800;letter-spacing:1px;margin:24px 0 10px}.agent-profile{display:flex;gap:10px;align-items:center;background:#fff0e5;padding:12px;border-radius:17px;color:#73422e}.agent-mark{width:39px;height:39px;display:grid;place-items:center;border-radius:13px;background:#c96d42;color:white;font-size:22px}.agent-profile small{display:block;color:#a57460;margin-top:2px}.hint{font-size:12px;line-height:1.65;color:#907b70}.thread{display:block;border:0;background:transparent;color:#725f55;text-align:left;border-radius:12px;padding:10px;width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}.thread.active,.thread:hover{background:#f9ece3;color:#a44e2c}.chat{display:flex;flex-direction:column;min-height:690px;overflow:hidden}.chat header{padding:24px 28px 14px;display:flex;justify-content:space-between}.eyebrow{font-size:11px;letter-spacing:1.4px;color:#b47b62;font-weight:800}.chat h1{font-size:25px;margin:5px 0;color:#5a3527}.status{font-size:12px;color:#57915d;background:#eff8ef;border-radius:20px;padding:7px 10px;height:max-content}.quick{padding:0 28px 16px;display:flex;gap:8px;flex-wrap:wrap}.quick button{border:1px solid #f0d4c4;border-radius:20px;padding:7px 11px;background:#fff9f4;color:#a05d41;cursor:pointer}.messages{flex:1;padding:18px 28px;overflow:auto;background:#fffcf9;border-top:1px solid #f5e8df;border-bottom:1px solid #f5e8df}.empty{text-align:center;color:#9c8377;padding:100px 15%;line-height:1.7}.empty div{font-size:40px;color:#c96d42}.bubble{max-width:78%;margin:12px 0;padding:12px 15px;border-radius:17px;white-space:pre-wrap;line-height:1.65}.bubble span{font-size:11px;font-weight:800;color:#b47b62}.bubble p{margin:4px 0 0}.bubble.assistant{background:#f9ece3;color:#5f4437;border-bottom-left-radius:4px}.bubble.user{margin-left:auto;background:#c96d42;color:white;border-bottom-right-radius:4px}.bubble.user span{color:#ffe7d6}.chat form{padding:16px 24px}.chat textarea{width:100%;box-sizing:border-box;resize:none;height:72px;border:1px solid #ead8cd;border-radius:16px;padding:12px;font:inherit;color:#553a2d;background:#fff}.chat form>div{display:flex;justify-content:space-between;align-items:center;margin-top:8px}.chat small{color:#ad9183}@media(max-width:800px){.agent-page{grid-template-columns:1fr;padding:15px}.threads{display:none}.chat{min-height:calc(100vh - 100px)}.chat header{padding:20px}.status{display:none}.messages{padding:15px}.bubble{max-width:92%}}
+</style>

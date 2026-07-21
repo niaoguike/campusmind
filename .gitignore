@@ -1,0 +1,18 @@
+node_modules/
+dist/
+dist-check/
+.env
+server/.env
+*.log
+server/server.err
+.vscode/
+.DS_Store
+
+# Local runtime data and uploads. Never commit student data or API-key storage.
+server/data.db
+server/data.db-*
+data/
+tmp_*.png
+
+# Unrelated local tooling checkout.
+opencode/
