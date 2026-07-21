@@ -10,6 +10,7 @@ import Messages from '../views/Messages.vue'
 import Community from '../views/Community.vue'
 import MessagesSocial from '../views/MessagesSocial.vue'
 import Profile from '../views/Profile.vue'
+import FriendAgentChat from '../views/FriendAgentChat.vue'
 
 const requireAuth = (to, from, next) => {
   const token = localStorage.getItem('token')
@@ -26,6 +27,7 @@ const routes = [
   { path: '/schedule', component: Schedule, beforeEnter: requireAuth },
   { path: '/messages', component: MessagesSocial, beforeEnter: requireAuth },
   { path: '/profile/:id', component: Profile, beforeEnter: requireAuth },
+  { path: '/friend-agent/:id', component: FriendAgentChat, beforeEnter: requireAuth },
   { path: '/community', component: Community, beforeEnter: requireAuth },
   { path: '/admin', component: Admin, beforeEnter: requireAuth }
 ]
