@@ -30,9 +30,9 @@
           </el-tab-pane>
           <el-tab-pane label="注册账号" name="register">
             <el-form :model="regForm" class="form compact" @submit.prevent="handleRegister">
-              <div class="two-col"><el-form-item label="姓名"><el-input v-model="regForm.name" placeholder="真实姓名" /></el-form-item><el-form-item label="8 位学号"><el-input v-model="regForm.student_id" inputmode="numeric" placeholder="例如 20240101" /></el-form-item></div>
+              <div class="two-col"><el-form-item label="姓名"><el-input v-model="regForm.name" placeholder="真实姓名" /></el-form-item><el-form-item label="8 位学号"><el-input v-model="regForm.student_id" inputmode="numeric" placeholder="例如 55240101" /></el-form-item></div>
               <el-form-item label="手机号"><el-input v-model="regForm.phone" placeholder="用于联系" /></el-form-item>
-              <div class="two-col"><el-form-item label="学院"><el-select v-model="regForm.college" filterable placeholder="选择或搜索学院"><el-option v-for="college in colleges" :key="college" :label="college" :value="college"/></el-select></el-form-item><el-form-item label="班级"><el-input v-model="regForm.class" placeholder="如：软件工程 2401" /></el-form-item></div>
+              <div class="two-col"><el-form-item label="学院"><el-select v-model="regForm.college" filterable placeholder="选择或搜索学院"><el-option v-for="college in colleges" :key="college" :label="college" :value="college"/></el-select></el-form-item><el-form-item label="班级"><el-input v-model="regForm.class" placeholder="如：552413" /></el-form-item></div>
               <el-form-item label="设置密码"><el-input v-model="regForm.password" type="password" autocomplete="new-password" placeholder="至少 6 位" show-password /></el-form-item>
               <el-button class="main-button" :loading="loading" size="large" native-type="submit">创建学习账号 <span>→</span></el-button>
             </el-form>
