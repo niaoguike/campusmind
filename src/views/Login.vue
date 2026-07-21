@@ -68,7 +68,8 @@ async function handleLogin () {
     localStorage.setItem('token', data.token)
     localStorage.setItem('user', JSON.stringify(data.user))
     ElMessage.success(`欢迎回来，${data.user.name}`)
-    router.push(data.user.hasApiKey ? '/dashboard' : '/setup-key')
+    // 模型密钥是可选配置：学生可以先进入平台，之后再从右上角的模型设置中绑定。
+    router.push('/dashboard')
   } catch { ElMessage.error('无法连接后端服务，请确认 server 终端正在运行') } finally { loading.value = false }
 }
 
