@@ -15,6 +15,7 @@ import { createAgent, tool } from 'langchain'
 import { z } from 'zod'
 import multer from 'multer'
 import XLSX from 'xlsx'
+import { extractResourceChunks, searchKnowledgeChunks } from './services/resourceRag.js'
 
 dotenv.config()
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -189,7 +190,14 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS friend_agent_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, requester_id INTEGER NOT NULL, agent_owner_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS forum_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, author_id INTEGER NOT NULL, category TEXT DEFAULT '学习交流', title TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS forum_comments (id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, author_id INTEGER NOT NULL, content TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
+  CREATE TABLE IF NOT EXISTS resource_documents (resource_id INTEGER PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending', error_message TEXT DEFAULT '', chunk_count INTEGER DEFAULT 0, processed_at TEXT DEFAULT '');
+  CREATE TABLE IF NOT EXISTS resource_chunks (id INTEGER PRIMARY KEY AUTOINCREMENT, resource_id INTEGER NOT NULL, chunk_index INTEGER NOT NULL, content TEXT NOT NULL, page_number INTEGER, UNIQUE(resource_id, chunk_index));
 `)
+try {
+  db.exec('CREATE VIRTUAL TABLE IF NOT EXISTS resource_chunks_fts USING fts5(content, resource_id UNINDEXED, chunk_id UNINDEXED)')
+} catch (error) {
+  console.error('SQLite FTS5 初始化失败：', error.message)
+}
 for (const column of [
   "ALTER TABLE schedules ADD COLUMN weeks TEXT DEFAULT '1-16'",
   "ALTER TABLE schedules ADD COLUMN semester_start TEXT DEFAULT ''",
@@ -234,6 +242,42 @@ bootstrapAdmin()
 db.prepare("UPDATE resources SET file_path=REPLACE(file_path,'/uploads/resources/','/api/resources/files/') WHERE file_path LIKE '/uploads/resources/%'").run()
 for (const row of db.prepare("SELECT id,file_name FROM resources WHERE file_name!=''").all()) { const fixed=readableUploadName(row.file_name); if(fixed!==row.file_name) db.prepare('UPDATE resources SET file_name=? WHERE id=?').run(fixed,row.id) }
 
+async function indexResourceFile (resourceId) {
+  const resource = db.prepare("SELECT * FROM resources WHERE id=? AND file_path!=''").get(resourceId)
+  if (!resource) return
+  db.prepare("INSERT INTO resource_documents (resource_id,status,error_message,chunk_count,processed_at) VALUES (?, 'processing','',0,?) ON CONFLICT(resource_id) DO UPDATE SET status='processing',error_message='',chunk_count=0,processed_at=excluded.processed_at").run(resource.id, now())
+  try {
+    const storedName = path.basename(resource.file_path)
+    const buffer = await fs.readFile(path.join(resourceUploadDir, storedName))
+    const chunks = await extractResourceChunks(resource.file_name || storedName, buffer)
+    const writeChunks = db.transaction((items) => {
+      db.prepare('DELETE FROM resource_chunks_fts WHERE resource_id=?').run(resource.id)
+      db.prepare('DELETE FROM resource_chunks WHERE resource_id=?').run(resource.id)
+      const insertChunk = db.prepare('INSERT INTO resource_chunks (resource_id,chunk_index,content,page_number) VALUES (?,?,?,?)')
+      const insertFts = db.prepare('INSERT INTO resource_chunks_fts (content,resource_id,chunk_id) VALUES (?,?,?)')
+      items.forEach((item, index) => {
+        const result = insertChunk.run(resource.id, index, item.content, item.pageNumber || null)
+        insertFts.run(item.content, resource.id, Number(result.lastInsertRowid))
+      })
+      db.prepare("UPDATE resource_documents SET status='ready',error_message='',chunk_count=?,processed_at=? WHERE resource_id=?").run(items.length, now(), resource.id)
+    })
+    writeChunks(chunks)
+    console.log(`资料索引完成：#${resource.id}，${chunks.length} 个片段`)
+  } catch (error) {
+    console.error(`资料索引失败：#${resource.id}`, error.message)
+    db.prepare("INSERT INTO resource_documents (resource_id,status,error_message,chunk_count,processed_at) VALUES (?, 'failed',?,0,?) ON CONFLICT(resource_id) DO UPDATE SET status='failed',error_message=excluded.error_message,chunk_count=0,processed_at=excluded.processed_at").run(resource.id, String(error.message || '文件解析失败').slice(0,300), now())
+  }
+}
+function queueResourceIndex (resourceId) {
+  setTimeout(() => { indexResourceFile(resourceId).catch(error => console.error('资料索引任务异常：', error.message)) }, 80)
+}
+async function queueUnprocessedResources () {
+  await fs.mkdir(resourceUploadDir, { recursive: true })
+  const resources = db.prepare("SELECT r.id FROM resources r LEFT JOIN resource_documents d ON d.resource_id=r.id WHERE r.file_path!='' AND (d.status IS NULL OR d.status!='ready') ORDER BY r.id LIMIT 30").all()
+  for (const resource of resources) await indexResourceFile(resource.id)
+}
+setTimeout(() => { queueUnprocessedResources().catch(error => console.error('历史资料索引任务异常：', error.message)) }, 1500)
+
 const app=express(); app.use(cors()); app.use(express.json({limit:'1mb'})); app.use('/uploads/resources',express.static(resourceUploadDir))
 app.post('/api/register',(req,res)=>{const {student_id,name,phone,college,class:className,password}=req.body;if(![student_id,name,phone,college,className,password].every(Boolean))return res.status(400).json({error:'请填写所有必填信息'});if(!/^\d{8}$/.test(student_id))return res.status(400).json({error:'学号必须为 8 位数字'});try{db.prepare('INSERT INTO users (student_id,name,phone,college,class,password) VALUES (?,?,?,?,?,?)').run(student_id.trim(),name.trim(),phone.trim(),college.trim(),className.trim(),hashPassword(password));res.json({message:'注册成功，请登录'})}catch(e){res.status(e.message.includes('UNIQUE')?409:500).json({error:e.message.includes('UNIQUE')?'该学号已注册':'注册失败'})}})
 app.post('/api/login',(req,res)=>{const row=db.prepare('SELECT * FROM users WHERE student_id=?').get(req.body.student_id||'');if(!row||!passwordMatches(req.body.password||'',row.password))return res.status(401).json({error:'学号或密码错误'});if(!row.password.startsWith('scrypt$'))db.prepare('UPDATE users SET password=? WHERE id=?').run(hashPassword(req.body.password),row.id);if(row.api_key&&!row.api_key.startsWith('v1:')){row.api_key=encryptSecret(row.api_key);db.prepare('UPDATE users SET api_key=? WHERE id=?').run(row.api_key,row.id)}res.json({token:jwt.sign({id:row.id,student_id:row.student_id,name:row.name},JWT_SECRET,{expiresIn:'7d'}),user:publicUser(row)})})
@@ -246,11 +290,12 @@ app.delete('/api/user/apikey',auth,(req,res)=>{db.prepare("UPDATE users SET api_
 app.get('/api/dashboard',auth,(req,res)=>{const id=req.user.id;res.json({user:publicUser(userOf(id)),today:db.prepare('SELECT * FROM schedules WHERE user_id=? ORDER BY start_time').all(id),plans:db.prepare("SELECT * FROM study_plans WHERE user_id=? AND status!='done' ORDER BY id DESC LIMIT 4").all(id),resourceCount:db.prepare('SELECT COUNT(*) count FROM resources').get().count,friendCount:db.prepare('SELECT COUNT(*) count FROM friendships WHERE user_id=?').get(id).count,agentMemory:db.prepare('SELECT content FROM agent_memories WHERE user_id=? AND memory_key=?').get(id,'learning_profile')?.content||''})})
 app.get('/api/courses',auth,(req,res)=>res.json(db.prepare('SELECT c.*, (SELECT COUNT(*) FROM resources r WHERE r.course_id=c.id) resource_count FROM courses c ORDER BY c.id').all()))
 app.get('/api/resources/files/:fileName',(req,res)=>{const fileName=path.basename(req.params.fileName);if(fileName!==req.params.fileName)return res.status(404).end();const filePath=path.join(resourceUploadDir,fileName);res.sendFile(filePath,error=>{if(error&&!res.headersSent)res.status(error.code==='ENOENT'?404:500).json({error:'资料文件不存在或暂时无法打开'})})})
-app.get('/api/resources',auth,(req,res)=>{const query=(req.query.query||'').trim(),courseId=Number(req.query.course_id||0);let sql='SELECT r.*,c.name course_name,u.name uploader_name FROM resources r JOIN courses c ON c.id=r.course_id LEFT JOIN users u ON u.id=r.uploader_id WHERE 1=1',values=[];if(courseId){sql+=' AND r.course_id=?';values.push(courseId)}if(query){sql+=' AND (r.title LIKE ? OR r.description LIKE ? OR r.tags LIKE ? OR r.file_name LIKE ?)';values.push(`%${query}%`,`%${query}%`,`%${query}%`,`%${query}%`)}res.json(db.prepare(`${sql} ORDER BY r.is_pinned DESC,r.id DESC`).all(...values))})
+app.get('/api/resources',auth,(req,res)=>{const query=(req.query.query||'').trim(),courseId=Number(req.query.course_id||0);let sql="SELECT r.*,c.name course_name,u.name uploader_name,COALESCE(d.status,CASE WHEN r.file_path!='' THEN 'pending' ELSE 'not_applicable' END) ingestion_status,COALESCE(d.error_message,'') ingestion_error,COALESCE(d.chunk_count,0) chunk_count FROM resources r JOIN courses c ON c.id=r.course_id LEFT JOIN users u ON u.id=r.uploader_id LEFT JOIN resource_documents d ON d.resource_id=r.id WHERE 1=1",values=[];if(courseId){sql+=' AND r.course_id=?';values.push(courseId)}if(query){sql+=' AND (r.title LIKE ? OR r.description LIKE ? OR r.tags LIKE ? OR r.file_name LIKE ?)';values.push(`%${query}%`,`%${query}%`,`%${query}%`,`%${query}%`)}res.json(db.prepare(`${sql} ORDER BY r.is_pinned DESC,r.id DESC`).all(...values))})
 app.post('/api/resources',auth,(req,res)=>{const {course_id,title,description='',type='note',tags='',url=''}=req.body;if(!course_id||!title)return res.status(400).json({error:'请选择课程并填写资料标题'});const result=db.prepare('INSERT INTO resources (course_id,title,description,type,tags,url,uploader_id) VALUES (?,?,?,?,?,?,?)').run(course_id,title.trim(),description.trim(),type,tags.trim(),url.trim(),req.user.id);res.status(201).json({id:result.lastInsertRowid,message:'链接资料已发布'})})
-app.post('/api/resources/upload',auth,resourceUpload.single('file'),async(req,res)=>{const courseId=Number(req.body.course_id||0),file=req.file,title=String(req.body.title||'').trim(),description=String(req.body.description||'').trim(),tags=String(req.body.tags||'').trim(),type=String(req.body.type||'note').trim();if(!courseId||!db.prepare('SELECT 1 FROM courses WHERE id=?').get(courseId))return res.status(400).json({error:'请选择有效课程'});if(!file)return res.status(400).json({error:'请选择要上传的资料文件'});const originalName=readableUploadName(file.originalname),ext=path.extname(originalName).toLowerCase(),safeName=`${crypto.randomUUID()}${ext}`,filePath=path.join(resourceUploadDir,safeName);try{await fs.mkdir(resourceUploadDir,{recursive:true});await fs.writeFile(filePath,file.buffer);const result=db.prepare('INSERT INTO resources (course_id,title,description,type,tags,file_path,file_name,file_size,uploader_id) VALUES (?,?,?,?,?,?,?,?,?)').run(courseId,(title||path.basename(originalName,ext)).slice(0,100),description.slice(0,2000),type.slice(0,30),tags.slice(0,300),`/api/resources/files/${safeName}`,originalName.slice(0,255),file.size,req.user.id);res.status(201).json({id:result.lastInsertRowid,message:'资料文件已上传'})}catch(error){try{await fs.unlink(filePath)}catch{};res.status(500).json({error:'文件保存失败，请稍后重试'})}})
+app.post('/api/resources/upload',auth,resourceUpload.single('file'),async(req,res)=>{const courseId=Number(req.body.course_id||0),file=req.file,title=String(req.body.title||'').trim(),description=String(req.body.description||'').trim(),tags=String(req.body.tags||'').trim(),type=String(req.body.type||'note').trim();if(!courseId||!db.prepare('SELECT 1 FROM courses WHERE id=?').get(courseId))return res.status(400).json({error:'请选择有效课程'});if(!file)return res.status(400).json({error:'请选择要上传的资料文件'});const originalName=readableUploadName(file.originalname),ext=path.extname(originalName).toLowerCase(),safeName=`${crypto.randomUUID()}${ext}`,filePath=path.join(resourceUploadDir,safeName);try{await fs.mkdir(resourceUploadDir,{recursive:true});await fs.writeFile(filePath,file.buffer);const result=db.prepare('INSERT INTO resources (course_id,title,description,type,tags,file_path,file_name,file_size,uploader_id) VALUES (?,?,?,?,?,?,?,?,?)').run(courseId,(title||path.basename(originalName,ext)).slice(0,100),description.slice(0,2000),type.slice(0,30),tags.slice(0,300),`/api/resources/files/${safeName}`,originalName.slice(0,255),file.size,req.user.id);queueResourceIndex(Number(result.lastInsertRowid));res.status(201).json({id:result.lastInsertRowid,message:'资料文件已上传，正在建立 AI 检索索引'})}catch(error){try{await fs.unlink(filePath)}catch{};res.status(500).json({error:'文件保存失败，请稍后重试'})}})
+app.post('/api/resources/:id/reprocess',auth,(req,res)=>{const resource=db.prepare('SELECT * FROM resources WHERE id=?').get(req.params.id);if(!resource)return res.status(404).json({error:'资料不存在'});if(resource.uploader_id!==req.user.id&&!isAdmin(req.user.id))return res.status(403).json({error:'只能重新处理自己发布的资料'});if(!resource.file_path)return res.status(400).json({error:'链接资料不能建立正文索引，请上传资料文件'});queueResourceIndex(resource.id);res.json({message:'已开始重新解析，请稍后刷新资料列表查看状态'})})
 app.patch('/api/resources/:id/pin',auth,(req,res)=>{if(!isAdmin(req.user.id))return res.status(403).json({error:'只有管理员可以置顶资料'});const resource=db.prepare('SELECT id FROM resources WHERE id=?').get(req.params.id);if(!resource)return res.status(404).json({error:'资料不存在'});db.prepare('UPDATE resources SET is_pinned=? WHERE id=?').run(req.body.pinned?1:0,resource.id);res.json({message:req.body.pinned?'资料已置顶':'已取消置顶'})})
-app.delete('/api/resources/:id',auth,async(req,res)=>{const resource=db.prepare('SELECT * FROM resources WHERE id=?').get(req.params.id);if(!resource)return res.status(404).json({error:'资料不存在'});if(resource.uploader_id!==req.user.id&&!isAdmin(req.user.id))return res.status(403).json({error:'只能删除自己发布的资料'});db.prepare('DELETE FROM resources WHERE id=?').run(resource.id);if(resource.file_path){const target=path.resolve(__dirname,'.'+resource.file_path);if(target.startsWith(path.resolve(resourceUploadDir)))try{await fs.unlink(target)}catch{}}res.json({message:'资料已删除'})})
+app.delete('/api/resources/:id',auth,async(req,res)=>{const resource=db.prepare('SELECT * FROM resources WHERE id=?').get(req.params.id);if(!resource)return res.status(404).json({error:'资料不存在'});if(resource.uploader_id!==req.user.id&&!isAdmin(req.user.id))return res.status(403).json({error:'只能删除自己发布的资料'});const remove=db.transaction(()=>{db.prepare('DELETE FROM resource_chunks_fts WHERE resource_id=?').run(resource.id);db.prepare('DELETE FROM resource_chunks WHERE resource_id=?').run(resource.id);db.prepare('DELETE FROM resource_documents WHERE resource_id=?').run(resource.id);db.prepare('DELETE FROM resources WHERE id=?').run(resource.id)});remove();if(resource.file_path){const target=path.resolve(__dirname,'.'+resource.file_path);if(target.startsWith(path.resolve(resourceUploadDir)))try{await fs.unlink(target)}catch{}}res.json({message:'资料及其 AI 检索索引已删除'})})
 app.post('/api/schedules/import-preview', auth, upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: '请选择课表文件' })
   try {
@@ -335,13 +380,13 @@ app.delete('/api/forum/comments/:id',auth,(req,res)=>{const comment=db.prepare('
 
 function makeAgent(user) {
   const userId=user.id
-  const search=tool(({query})=>{const aliases=query.includes('毛概')?['毛泽东思想','中国特色社会主义理论体系概论']:[];const terms=[query,...aliases],where=terms.map(()=>'(r.title LIKE ? OR r.description LIKE ? OR r.tags LIKE ? OR r.file_name LIKE ? OR c.name LIKE ?)').join(' OR '),values=terms.flatMap(term=>Array(5).fill(`%${term}%`));const rows=db.prepare(`SELECT r.title,r.description,r.tags,r.file_name,r.file_path,c.name course_name,r.url FROM resources r JOIN courses c ON c.id=r.course_id WHERE ${where} LIMIT 8`).all(...values);return rows.length?JSON.stringify(rows):'资源库没有找到相关资料；请明确告知学生，不要编造引用。'},{name:'search_course_resources',description:'搜索平台课程资料的标题、标签、课程名称与文件名；课程知识问答前必须优先使用。',schema:z.object({query:z.string().min(1)})})
+  const search=tool(({query})=>{const rows=searchKnowledgeChunks(db,query);return rows.length?JSON.stringify(rows):'资源库没有找到可用正文片段；请明确告知学生，不要编造课程资料或引用。'},{name:'search_course_resources',description:'检索整个平台资料库中已解析的课程文件正文，并返回带课程、文件名、页码/幻灯片与文件链接的引用片段。回答课程知识问题前必须优先使用；检索词应尽量短且包含课程名、概念名或关键词。',schema:z.object({query:z.string().min(1).max(120)})})
   const snapshot=tool(()=>JSON.stringify({schedule:db.prepare('SELECT course_name,weekday,start_time,end_time,location FROM schedules WHERE user_id=? ORDER BY weekday,start_time').all(userId),plans:db.prepare("SELECT title,content,status,due_date FROM study_plans WHERE user_id=? AND status!='done' ORDER BY id DESC LIMIT 5").all(userId),profile:db.prepare('SELECT content FROM agent_memories WHERE user_id=? AND memory_key=?').get(userId,'learning_profile')?.content||'尚未建立学习画像'}),{name:'get_my_learning_snapshot',description:'读取当前学生自己的课表、未完成计划和学习画像；制定安排前调用。',schema:z.object({})})
   const draft=tool(({title,content,due_date})=>{const result=db.prepare('INSERT INTO study_plans (user_id,title,content,status,due_date) VALUES (?,?,?,?,?)').run(userId,title,content,'draft',due_date||null);return `已创建待确认计划草稿 #${result.lastInsertRowid}，请提醒学生到学习计划区确认后执行。`},{name:'create_plan_draft',description:'学生明确要求时创建可编辑学习计划草稿，绝不直接执行。',schema:z.object({title:z.string().min(2),content:z.string().min(10),due_date:z.string().optional()})})
   const remember=tool(({summary})=>{db.prepare("INSERT INTO agent_memories (user_id,memory_key,content,updated_at) VALUES (?,?,?,?) ON CONFLICT(user_id,memory_key) DO UPDATE SET content=excluded.content,updated_at=excluded.updated_at").run(userId,'learning_profile',summary,now());return '已更新学习画像，只记录学习偏好、目标和薄弱点。'},{name:'save_learning_profile',description:'学生明确要求记住目标、偏好或薄弱点时使用。',schema:z.object({summary:z.string().min(5).max(600)})})
   const modelName=SUPPORTED_DEEPSEEK_MODELS.has(user.model_type)?user.model_type:'deepseek-v4-flash'
   const model=new ChatOpenAI({model:modelName,apiKey:decryptSecret(user.api_key),temperature:0.4,configuration:{baseURL:'https://api.deepseek.com'}})
-  return createAgent({model,tools:[search,snapshot,draft,remember],systemPrompt:`你是 CampusMind 的专属学习智能体，服务对象为 ${user.name}。你用中文以教练方式帮助理解、规划、复盘。规则：资料问答先调用 search_course_resources 并列出来源，找不到就说明不确定；制定计划先调用 get_my_learning_snapshot，且只创建待确认草稿；只能读取当前学生数据；作业先给思路而非代写答案；回复结构清晰、简洁。`})
+  return createAgent({model,tools:[search,snapshot,draft,remember],systemPrompt:`你是 CampusMind 的专属学习智能体，服务对象为 ${user.name}。你用中文以教练方式帮助理解、规划、复盘。规则：课程资料问答先调用 search_course_resources；只可依据工具返回的 excerpt 作答，答案末尾用“资料来源：”逐条列出 source 与 file_path，找不到就说明不确定，不能伪造引用；制定计划先调用 get_my_learning_snapshot，且只创建待确认草稿；只能读取当前学生数据；作业先给思路而非代写答案；回复结构清晰、简洁。`})
 }
 app.get('/api/agent/threads',auth,(req,res)=>res.json(db.prepare('SELECT * FROM agent_threads WHERE user_id=? ORDER BY updated_at DESC').all(req.user.id)))
 app.post('/api/agent/threads',auth,(req,res)=>{const result=db.prepare('INSERT INTO agent_threads (user_id,title) VALUES (?,?)').run(req.user.id,(req.body.title||'新的学习对话').slice(0,50));res.status(201).json({id:result.lastInsertRowid})})
