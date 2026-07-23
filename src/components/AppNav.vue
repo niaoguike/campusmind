@@ -18,6 +18,7 @@ import { useRouter } from 'vue-router'
 const router = useRouter()
 const user = computed(() => JSON.parse(localStorage.getItem('user') || '{}'))
 const links = [
+  { to: '/favorites', label: '收藏题库', icon: '★' },
   { to: '/quiz', label: 'AI 答题', icon: '✦' },
   { to: '/dashboard', label: '学习首页', icon: '⌂' }, { to: '/home', label: '我的 Agent', icon: '✦' },
   { to: '/course', label: '课程资料', icon: '▣' }, { to: '/schedule', label: '课表计划', icon: '◷' }, { to: '/messages', label: '学习协作', icon: '◉' },

@@ -92,7 +92,7 @@ function aliasesFor (query) {
   return aliases
 }
 
-export function searchKnowledgeChunks (db, query, limit = 8) {
+export function searchKnowledgeChunks (db, query, limit = 8, courseId = 0) {
   const rawQuery = cleanText(query).slice(0, 120)
   if (!rawQuery) return []
   const terms = [...new Set([rawQuery, ...aliasesFor(rawQuery)])]
@@ -103,7 +103,7 @@ export function searchKnowledgeChunks (db, query, limit = 8) {
       const ftsQuery = ftsTerms.map(term => `"${term}"`).join(' OR ')
       rows = db.prepare(`SELECT rc.id chunk_id,rc.content,rc.page_number,r.title,r.file_name,r.file_path,r.url,c.name course_name
         FROM resource_chunks_fts f JOIN resource_chunks rc ON rc.id=f.chunk_id JOIN resources r ON r.id=rc.resource_id JOIN courses c ON c.id=r.course_id
-        WHERE resource_chunks_fts MATCH ? ORDER BY r.is_pinned DESC,rc.id DESC LIMIT ?`).all(ftsQuery, limit)
+        WHERE resource_chunks_fts MATCH ? ${courseId ? 'AND r.course_id=?' : ''} ORDER BY r.is_pinned DESC,rc.id DESC LIMIT ?`).all(...(courseId ? [ftsQuery, courseId, limit] : [ftsQuery, limit]))
     } catch {
       // SQLite FTS may reject a malformed query; LIKE retrieval below remains available.
     }
@@ -112,12 +112,12 @@ export function searchKnowledgeChunks (db, query, limit = 8) {
   const values = terms.flatMap(term => Array(6).fill(`%${term}%`))
   if (!rows.length) rows = db.prepare(`SELECT rc.id chunk_id,rc.content,rc.page_number,r.title,r.file_name,r.file_path,r.url,c.name course_name
     FROM resource_chunks rc JOIN resources r ON r.id=rc.resource_id JOIN courses c ON c.id=r.course_id
-    WHERE ${filters.join(' OR ')} ORDER BY r.is_pinned DESC,rc.id DESC LIMIT ?`).all(...values, limit)
+    WHERE (${filters.join(' OR ')}) ${courseId ? 'AND r.course_id=?' : ''} ORDER BY r.is_pinned DESC,rc.id DESC LIMIT ?`).all(...values,...(courseId ? [courseId, limit] : [limit]))
   if (!rows.length) {
     const keyword = rawQuery.match(/[A-Za-z0-9]{3,}|[\u4e00-\u9fff]{2,8}/g)?.sort((a, b) => b.length - a.length)[0]
     if (keyword) rows = db.prepare(`SELECT rc.id chunk_id,rc.content,rc.page_number,r.title,r.file_name,r.file_path,r.url,c.name course_name
       FROM resource_chunks rc JOIN resources r ON r.id=rc.resource_id JOIN courses c ON c.id=r.course_id
-      WHERE rc.content LIKE ? OR r.title LIKE ? OR r.file_name LIKE ? OR c.name LIKE ? ORDER BY r.is_pinned DESC,rc.id DESC LIMIT ?`).all(`%${keyword}%`,`%${keyword}%`,`%${keyword}%`,`%${keyword}%`,limit)
+      WHERE (rc.content LIKE ? OR r.title LIKE ? OR r.file_name LIKE ? OR c.name LIKE ?) ${courseId ? 'AND r.course_id=?' : ''} ORDER BY r.is_pinned DESC,rc.id DESC LIMIT ?`).all(`%${keyword}%`,`%${keyword}%`,`%${keyword}%`,`%${keyword}%`,...(courseId ? [courseId, limit] : [limit]))
   }
   return rows.map(row => ({
     source: `${row.course_name}｜${row.file_name || row.title}${row.page_number ? `｜第 ${row.page_number} 页/张` : ''}`,

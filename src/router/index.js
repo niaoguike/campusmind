@@ -14,6 +14,7 @@ import Profile from '../views/Profile.vue'
 import FriendAgentChat from '../views/FriendAgentChat.vue'
 import CourseResource from '../views/CourseResource.vue'
 import Quiz from '../views/Quiz.vue'
+import Favorites from '../views/Favorites.vue'
 
 const requireAuth = (to, from, next) => {
   const token = localStorage.getItem('token')
@@ -28,6 +29,7 @@ const routes = [
   { path: '/dashboard', component: Dashboard, beforeEnter: requireAuth },
   { path: '/course', component: CourseResource, beforeEnter: requireAuth },
   { path: '/quiz', component: Quiz, beforeEnter: requireAuth },
+  { path: '/favorites', component: Favorites, beforeEnter: requireAuth },
   { path: '/schedule', component: Schedule, beforeEnter: requireAuth },
   { path: '/messages', component: MessagesSocial, beforeEnter: requireAuth },
   { path: '/profile/:id', component: Profile, beforeEnter: requireAuth },
