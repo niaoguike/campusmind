@@ -25,8 +25,8 @@
         <header class="exam-header"><div><span class="eyebrow">AI GENERATED QUIZ</span><h2>{{ quiz.title }}</h2><p>{{ quiz.topic }} · {{ quiz.questions.length }} 道题</p></div><button class="plain" :disabled="loading" @click="restart">重新设置</button></header>
         <article v-for="(question, index) in quiz.questions" :key="question.id" class="question-card">
           <div class="question-title"><b>{{ index + 1 }}</b><span>{{ typeLabel(question.type) }}</span><p>{{ question.stem }}</p></div>
-          <el-radio-group v-if="question.type === 'single' || question.type === 'true_false'" v-model="answers[question.id]" class="options"><el-radio v-for="(option, optionIndex) in question.options" :key="optionIndex" :value="letter(optionIndex)">{{ letter(optionIndex) }}. {{ option }}</el-radio></el-radio-group>
-          <el-checkbox-group v-else-if="question.type === 'multiple'" v-model="answers[question.id]" class="options"><el-checkbox v-for="(option, optionIndex) in question.options" :key="optionIndex" :value="letter(optionIndex)">{{ letter(optionIndex) }}. {{ option }}</el-checkbox></el-checkbox-group>
+          <el-radio-group v-if="question.type === 'single' || question.type === 'true_false'" v-model="answers[question.id]" class="options"><el-radio v-for="(option, optionIndex) in question.options" :key="optionIndex" :value="letter(optionIndex)">{{ letter(optionIndex) }}. {{ displayOption(option) }}</el-radio></el-radio-group>
+          <el-checkbox-group v-else-if="question.type === 'multiple'" v-model="answers[question.id]" class="options"><el-checkbox v-for="(option, optionIndex) in question.options" :key="optionIndex" :value="letter(optionIndex)">{{ letter(optionIndex) }}. {{ displayOption(option) }}</el-checkbox></el-checkbox-group>
           <el-input v-else-if="question.type === 'fill_blank'" v-model="answers[question.id]" maxlength="300" placeholder="请填写答案…" />
           <el-input v-else v-model="answers[question.id]" type="textarea" :rows="5" maxlength="1200" show-word-limit placeholder="请写下你的理解、推导或关键要点…" />
           <button class="favorite-button" :disabled="favoriteLoading[question.id]" @click="toggleFavorite(question)">{{ favoriteIds[question.id] ? '★ 已收藏' : '☆ 收藏此题' }}</button>
@@ -65,6 +65,7 @@ const favoriteIds = ref({})
 const favoriteLoading = ref({})
 const letter = index => String.fromCharCode(65 + index)
 const typeLabel = type => ({ single: '单选题', multiple: '多选题', true_false: '判断题', fill_blank: '填空题', short: '简答题' })[type] || '练习题'
+const displayOption = option => String(option || '').trim().replace(/^(?:选项\s*)?[A-F]\s*[\.、．)）:：]\s*/i, '')
 const formatAnswer = answer => Array.isArray(answer) ? answer.join('、') : String(answer || '—')
 
 async function generateQuiz () {
