@@ -26,8 +26,8 @@
 
       <section class="resources">
         <template v-for="group in groupedResources" :key="group.key">
-        <div v-if="group.folder" class="folder-heading"><span>📁</span><div><b>{{ group.name }}</b><small>{{ group.items.length }} 个资料文件 · 已纳入本课程 AI 检索</small></div></div>
-        <article v-for="resource in group.items" :key="resource.id" class="resource-card">
+        <button v-if="group.folder" class="folder-heading" @click="openFolder(group)"><span>📁</span><div><b>{{ group.name }}</b><small>{{ group.items.length }} 个资料文件 · {{ group.description || '已纳入本课程 AI 检索' }}</small></div><strong>打开文件夹 →</strong></button>
+        <article v-for="resource in group.folder ? [] : group.items" :key="resource.id" class="resource-card">
           <div class="file">{{ icon(resource.type) }}</div>
           <div class="resource-main">
             <span>{{ resource.course_name }} · {{ resource.type }} <b v-if="resource.is_pinned" class="pinned">置顶</b></span>
@@ -89,10 +89,12 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useRouter } from 'vue-router'
 import AppNav from '../components/AppNav.vue'
 import { api } from '../utils/api'
 
 const courses = ref([])
+const router = useRouter()
 const resources = ref([])
 const selected = ref(0)
 const query = ref('')
@@ -112,7 +114,7 @@ const groupedResources = computed(() => {
   const groups = new Map()
   for (const resource of resources.value) {
     const key = resource.folder_id ? `folder-${resource.folder_id}` : `single-${resource.id}`
-    if (!groups.has(key)) groups.set(key, { key, folder: Boolean(resource.folder_id), name: resource.folder_name || '', items: [] })
+    if (!groups.has(key)) groups.set(key, { key, folder: Boolean(resource.folder_id), id: resource.folder_id, name: resource.folder_name || '', description: resource.folder_description || '', items: [] })
     groups.get(key).items.push(resource)
   }
   return [...groups.values()]
@@ -127,6 +129,7 @@ async function loadResources () {
   resources.value = await api(`/resources?course_id=${selected.value || ''}&query=${encodeURIComponent(query.value)}`)
 }
 function chooseFile (event) { file.value = event.target.files?.[0] || null }
+function openFolder (folder) { router.push(`/course/folders/${folder.id}`) }
 function chooseFolder (event) {
   folderFiles.value = Array.from(event.target.files || [])
   const first = folderFiles.value[0]
@@ -193,5 +196,5 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.content{max-width:1120px;margin:auto;padding:36px 5vw}.title{display:flex;justify-content:space-between;align-items:end;gap:20px}.eyebrow{font-size:11px;color:#b26b4a;letter-spacing:1.3px;font-weight:800}.title h1{color:#623a2b;margin:5px 0;font-size:31px}.title p{color:#92776a;max-width:700px}.primary{border:0;border-radius:13px;background:#c96d42;color:#fff;padding:11px 15px;font-weight:700;cursor:pointer;white-space:nowrap}.primary:disabled{opacity:.65;cursor:wait}.course-tabs{display:flex;gap:10px;overflow:auto;margin:28px 0 16px}.course-tabs button{min-width:185px;text-align:left;padding:14px;border:1px solid #efdfd4;border-radius:17px;background:#fffdfa;color:#7e6154;cursor:pointer}.course-tabs button.active{background:#fff0e4;border-color:#e9bca6}.course-tabs i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px}.course-tabs span{display:block;margin:6px 0 0 15px;font-size:12px;color:#a78d80}.panel,.resource-card,.empty{background:#fffdfa;border:1px solid #f1e2d8;border-radius:21px;box-shadow:0 10px 30px #9f4c2b0d}.toolbar{display:flex;align-items:center;gap:16px;padding:11px 15px}.toolbar span{font-size:13px;color:#987d70;white-space:nowrap}.resources{display:grid;gap:12px;margin-top:16px}.folder-heading{display:flex;align-items:center;gap:10px;padding:14px 17px;margin-top:8px;border-radius:17px;background:#fbeddf;color:#884d32}.folder-heading>span{font-size:22px}.folder-heading b,.folder-heading small{display:block}.folder-heading small{margin-top:3px;font-size:12px;color:#a06e57}.resource-card{padding:18px;display:flex;gap:15px;align-items:flex-start}.file{width:44px;height:44px;display:grid;place-items:center;border-radius:15px;background:#fff0e4;color:#b95d38;font-size:22px}.resource-main{flex:1;min-width:0}.resource-main>span,.resource-main small{font-size:12px;color:#a48475}.resource-main h2{font-size:17px;color:#634030;margin:5px 0}.folder-path{display:block;margin:-1px 0 7px;color:#a56748!important;word-break:break-all}.resource-main p{color:#866d61;margin:0 0 7px;line-height:1.5}.pinned{margin-left:6px;background:#f8dfc9;color:#a95331;border-radius:9px;padding:3px 6px;font-size:11px}.index-status,.index-error{display:block;margin-top:6px;font-style:normal}.index-status{color:#a76d37}.index-status.ready{color:#5f8a62}.index-status.failed,.index-error{color:#bd5d4c}.actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;justify-content:flex-end;max-width:150px}.actions a,.plain{color:#af5937;font-size:13px;text-decoration:none;padding:7px;border:0;background:transparent;cursor:pointer}.delete{border:0;background:#fff0ed;color:#ba5541;border-radius:9px;padding:6px 9px;font-size:12px;cursor:pointer}.empty{padding:35px;text-align:center;color:#9c8173}.file-input{width:100%;padding:9px;border:1px dashed #e2bba7;border-radius:12px;box-sizing:border-box;background:#fffaf6}.upload-note{display:block;color:#a48676;line-height:1.6;margin-top:6px}.selected-file{color:#8c593d;margin:8px 0 0;word-break:break-all}@media(max-width:640px){.content{padding:20px}.title h1{font-size:26px}.title{align-items:start;flex-direction:column}.resource-card{padding:14px;gap:10px}.actions{max-width:110px}.resource-main h2{word-break:break-word}}
+.content{max-width:1120px;margin:auto;padding:36px 5vw}.title{display:flex;justify-content:space-between;align-items:end;gap:20px}.eyebrow{font-size:11px;color:#b26b4a;letter-spacing:1.3px;font-weight:800}.title h1{color:#623a2b;margin:5px 0;font-size:31px}.title p{color:#92776a;max-width:700px}.primary{border:0;border-radius:13px;background:#c96d42;color:#fff;padding:11px 15px;font-weight:700;cursor:pointer;white-space:nowrap}.primary:disabled{opacity:.65;cursor:wait}.course-tabs{display:flex;gap:10px;overflow:auto;margin:28px 0 16px}.course-tabs button{min-width:185px;text-align:left;padding:14px;border:1px solid #efdfd4;border-radius:17px;background:#fffdfa;color:#7e6154;cursor:pointer}.course-tabs button.active{background:#fff0e4;border-color:#e9bca6}.course-tabs i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px}.course-tabs span{display:block;margin:6px 0 0 15px;font-size:12px;color:#a78d80}.panel,.resource-card,.empty{background:#fffdfa;border:1px solid #f1e2d8;border-radius:21px;box-shadow:0 10px 30px #9f4c2b0d}.toolbar{display:flex;align-items:center;gap:16px;padding:11px 15px}.toolbar span{font-size:13px;color:#987d70;white-space:nowrap}.resources{display:grid;gap:12px;margin-top:16px}.folder-heading{width:100%;border:1px solid #f1d6c2;display:flex;align-items:center;gap:10px;padding:14px 17px;margin-top:8px;border-radius:17px;background:#fbeddf;color:#884d32;text-align:left;cursor:pointer}.folder-heading:hover{background:#ffe4cf;border-color:#e7b99e}.folder-heading>span{font-size:22px}.folder-heading b,.folder-heading small{display:block}.folder-heading small{margin-top:3px;font-size:12px;color:#a06e57}.folder-heading strong{margin-left:auto;font-size:13px;color:#af5c3a;white-space:nowrap}.resource-card{padding:18px;display:flex;gap:15px;align-items:flex-start}.file{width:44px;height:44px;display:grid;place-items:center;border-radius:15px;background:#fff0e4;color:#b95d38;font-size:22px}.resource-main{flex:1;min-width:0}.resource-main>span,.resource-main small{font-size:12px;color:#a48475}.resource-main h2{font-size:17px;color:#634030;margin:5px 0}.folder-path{display:block;margin:-1px 0 7px;color:#a56748!important;word-break:break-all}.resource-main p{color:#866d61;margin:0 0 7px;line-height:1.5}.pinned{margin-left:6px;background:#f8dfc9;color:#a95331;border-radius:9px;padding:3px 6px;font-size:11px}.index-status,.index-error{display:block;margin-top:6px;font-style:normal}.index-status{color:#a76d37}.index-status.ready{color:#5f8a62}.index-status.failed,.index-error{color:#bd5d4c}.actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;justify-content:flex-end;max-width:150px}.actions a,.plain{color:#af5937;font-size:13px;text-decoration:none;padding:7px;border:0;background:transparent;cursor:pointer}.delete{border:0;background:#fff0ed;color:#ba5541;border-radius:9px;padding:6px 9px;font-size:12px;cursor:pointer}.empty{padding:35px;text-align:center;color:#9c8173}.file-input{width:100%;padding:9px;border:1px dashed #e2bba7;border-radius:12px;box-sizing:border-box;background:#fffaf6}.upload-note{display:block;color:#a48676;line-height:1.6;margin-top:6px}.selected-file{color:#8c593d;margin:8px 0 0;word-break:break-all}@media(max-width:640px){.content{padding:20px}.title h1{font-size:26px}.title{align-items:start;flex-direction:column}.resource-card{padding:14px;gap:10px}.actions{max-width:110px}.resource-main h2{word-break:break-word}}
 </style>
