@@ -7,7 +7,8 @@ import SetupKey from '../views/SetupKey.vue'
 import Dashboard from '../views/Dashboard.vue'
 import Schedule from '../views/Schedule.vue'
 import Messages from '../views/Messages.vue'
-import Community from '../views/Community.vue'
+import ForumHome from '../views/ForumHome.vue'
+import ForumPost from '../views/ForumPost.vue'
 import MessagesSocial from '../views/MessagesSocial.vue'
 import Profile from '../views/Profile.vue'
 import FriendAgentChat from '../views/FriendAgentChat.vue'
@@ -31,7 +32,8 @@ const routes = [
   { path: '/messages', component: MessagesSocial, beforeEnter: requireAuth },
   { path: '/profile/:id', component: Profile, beforeEnter: requireAuth },
   { path: '/friend-agent/:id', component: FriendAgentChat, beforeEnter: requireAuth },
-  { path: '/community', component: Community, beforeEnter: requireAuth },
+  { path: '/community', component: ForumHome, beforeEnter: requireAuth },
+  { path: '/community/:id', component: ForumPost, beforeEnter: requireAuth },
   { path: '/admin', component: Admin, beforeEnter: requireAuth }
 ]
 
