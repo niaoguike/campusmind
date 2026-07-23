@@ -2,7 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import Login from '../views/Login.vue'
 import Home from '../views/Home.vue'
 import Course from '../views/Course.vue'
-import Admin from '../views/Admin.vue'
+import AdminConsole from '../views/AdminConsole.vue'
 import SetupKey from '../views/SetupKey.vue'
 import Dashboard from '../views/Dashboard.vue'
 import Schedule from '../views/Schedule.vue'
@@ -15,10 +15,15 @@ import FriendAgentChat from '../views/FriendAgentChat.vue'
 import CourseResource from '../views/CourseResource.vue'
 import Quiz from '../views/Quiz.vue'
 import Favorites from '../views/Favorites.vue'
+import AccountCenter from '../views/AccountCenter.vue'
 
 const requireAuth = (to, from, next) => {
   const token = localStorage.getItem('token')
   token ? next() : next('/login')
+}
+const requireAdmin = (to, from, next) => {
+  const user = JSON.parse(localStorage.getItem('user') || '{}')
+  user.is_admin ? next() : next('/dashboard')
 }
 
 const routes = [
@@ -32,11 +37,12 @@ const routes = [
   { path: '/favorites', component: Favorites, beforeEnter: requireAuth },
   { path: '/schedule', component: Schedule, beforeEnter: requireAuth },
   { path: '/messages', component: MessagesSocial, beforeEnter: requireAuth },
+  { path: '/account', component: AccountCenter, beforeEnter: requireAuth },
   { path: '/profile/:id', component: Profile, beforeEnter: requireAuth },
   { path: '/friend-agent/:id', component: FriendAgentChat, beforeEnter: requireAuth },
   { path: '/community', component: ForumHome, beforeEnter: requireAuth },
   { path: '/community/:id', component: ForumPost, beforeEnter: requireAuth },
-  { path: '/admin', component: Admin, beforeEnter: requireAuth }
+  { path: '/admin', component: AdminConsole, beforeEnter: requireAdmin }
 ]
 
 const router = createRouter({
