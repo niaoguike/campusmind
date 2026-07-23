@@ -47,6 +47,14 @@ const resourceUpload = multer({
     cb(allowed ? null : new Error('仅支持 PDF、Office、表格、文本或图片资料'), allowed)
   }
 })
+const resourceFolderUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024, files: 60 },
+  fileFilter: (req, file, cb) => {
+    const allowed = /\.(pdf|doc|docx|ppt|pptx|xls|xlsx|csv|txt|png|jpe?g)$/i.test(file.originalname || '')
+    cb(allowed ? null : new Error('文件夹内仅支持 PDF、Office、表格、文本或图片资料'), allowed)
+  }
+})
 const resourceUploadDir = path.join(__dirname, 'uploads', 'resources')
 
 const DAY_MAP = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '日': 7, '天': 7, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7 }
@@ -174,6 +182,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, student_id TEXT UNIQUE NOT NULL, name TEXT NOT NULL, phone TEXT NOT NULL, college TEXT NOT NULL, class TEXT NOT NULL, password TEXT NOT NULL, role TEXT DEFAULT 'student', avatar TEXT DEFAULT '🌿', bio TEXT DEFAULT '', agent_name TEXT DEFAULT '知行', agent_avatar TEXT DEFAULT '✦', model_type TEXT DEFAULT 'deepseek', api_key TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS courses (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, teacher TEXT, color TEXT DEFAULT '#d97745');
   CREATE TABLE IF NOT EXISTS resources (id INTEGER PRIMARY KEY AUTOINCREMENT, course_id INTEGER, title TEXT NOT NULL, description TEXT DEFAULT '', type TEXT DEFAULT 'note', tags TEXT DEFAULT '', url TEXT DEFAULT '', file_path TEXT DEFAULT '', file_name TEXT DEFAULT '', file_size INTEGER DEFAULT 0, is_pinned INTEGER DEFAULT 0, uploader_id INTEGER, created_at TEXT DEFAULT (datetime('now')));
+  CREATE TABLE IF NOT EXISTS resource_folders (id INTEGER PRIMARY KEY AUTOINCREMENT, course_id INTEGER NOT NULL, name TEXT NOT NULL, description TEXT DEFAULT '', tags TEXT DEFAULT '', uploader_id INTEGER NOT NULL, created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS schedules (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, course_name TEXT NOT NULL, weekday INTEGER NOT NULL, start_time TEXT NOT NULL, end_time TEXT NOT NULL, location TEXT DEFAULT '', color TEXT DEFAULT '#d97745');
   CREATE TABLE IF NOT EXISTS study_plans (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, status TEXT DEFAULT 'draft', due_date TEXT, created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS quizzes (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, thread_id INTEGER, course_id INTEGER, topic TEXT NOT NULL, title TEXT NOT NULL, quiz_json TEXT NOT NULL, answers_json TEXT DEFAULT '{}', result_json TEXT DEFAULT '{}', score REAL, total_score REAL, status TEXT DEFAULT 'created', created_at TEXT DEFAULT (datetime('now')), completed_at TEXT DEFAULT '');
@@ -220,6 +229,8 @@ for (const column of [
   "ALTER TABLE resources ADD COLUMN file_name TEXT DEFAULT ''",
   "ALTER TABLE resources ADD COLUMN file_size INTEGER DEFAULT 0",
   "ALTER TABLE resources ADD COLUMN is_pinned INTEGER DEFAULT 0",
+  "ALTER TABLE resources ADD COLUMN folder_id INTEGER",
+  "ALTER TABLE resources ADD COLUMN relative_path TEXT DEFAULT ''",
   "ALTER TABLE quizzes ADD COLUMN course_id INTEGER",
   "ALTER TABLE users ADD COLUMN account_status TEXT DEFAULT 'active'",
   "ALTER TABLE users ADD COLUMN disabled_reason TEXT DEFAULT ''"
@@ -251,6 +262,9 @@ function bootstrapAdmin () { const studentId=(process.env.ADMIN_STUDENT_ID||'').
 bootstrapAdmin()
 if (!db.prepare('SELECT 1 FROM announcements LIMIT 1').get()) {
   db.prepare('INSERT INTO announcements (title,content,is_pinned,author_id,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('平台功能更新','已上线：账户注销申请、管理员账户停用/删除、操作日志与公告通知中心。请在个人主页管理账户安全；管理员可在管理后台维护公告。',1,null,now(),now())
+}
+if (!db.prepare("SELECT 1 FROM announcements WHERE title='课程资料文件夹上传已上线' LIMIT 1").get()) {
+  db.prepare('INSERT INTO announcements (title,content,is_pinned,author_id,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('课程资料文件夹上传已上线','课程资料页现可选择整个本地文件夹上传。文件将按资料夹归类展示；其中每个可解析文件都会自动加入 Agent 的课程资料检索。',0,null,now(),now())
 }
 db.prepare("UPDATE resources SET file_path=REPLACE(file_path,'/uploads/resources/','/api/resources/files/') WHERE file_path LIKE '/uploads/resources/%'").run()
 for (const row of db.prepare("SELECT id,file_name FROM resources WHERE file_name!=''").all()) { const fixed=readableUploadName(row.file_name); if(fixed!==row.file_name) db.prepare('UPDATE resources SET file_name=? WHERE id=?').run(fixed,row.id) }
@@ -303,7 +317,7 @@ async function removeStudentAccount (target, actorId, detail='') {
     db.prepare('DELETE FROM forum_votes WHERE user_id=?').run(target.id);db.prepare('DELETE FROM forum_comments WHERE author_id=?').run(target.id);db.prepare('DELETE FROM forum_posts WHERE author_id=?').run(target.id)
     db.prepare('DELETE FROM question_favorites WHERE user_id=?').run(target.id);db.prepare('DELETE FROM quizzes WHERE user_id=?').run(target.id);db.prepare('DELETE FROM agent_messages WHERE thread_id IN (SELECT id FROM agent_threads WHERE user_id=?)').run(target.id);db.prepare('DELETE FROM agent_threads WHERE user_id=?').run(target.id);db.prepare('DELETE FROM agent_memories WHERE user_id=?').run(target.id);db.prepare('DELETE FROM study_plans WHERE user_id=?').run(target.id);db.prepare('DELETE FROM schedules WHERE user_id=?').run(target.id)
     db.prepare('DELETE FROM friend_agent_messages WHERE requester_id=? OR agent_owner_id=?').run(target.id,target.id);db.prepare('DELETE FROM friend_agent_access WHERE requester_id=? OR agent_owner_id=?').run(target.id,target.id);db.prepare('DELETE FROM agent_group_requests WHERE agent_owner_id=? OR requested_by_id=?').run(target.id,target.id);db.prepare('DELETE FROM group_agents WHERE user_id=?').run(target.id);db.prepare('DELETE FROM messages WHERE sender_id=? OR agent_owner_id=?').run(target.id,target.id);db.prepare('DELETE FROM conversation_members WHERE user_id=?').run(target.id);db.prepare('UPDATE conversations SET owner_id=NULL WHERE owner_id=?').run(target.id)
-    db.prepare('DELETE FROM friendships WHERE user_id=? OR friend_id=?').run(target.id,target.id);db.prepare('DELETE FROM friend_requests WHERE from_user_id=? OR to_user_id=?').run(target.id,target.id);db.prepare('DELETE FROM account_deletion_requests WHERE user_id=?').run(target.id);db.prepare('DELETE FROM resources WHERE uploader_id=?').run(target.id);db.prepare('DELETE FROM users WHERE id=?').run(target.id)
+    db.prepare('DELETE FROM friendships WHERE user_id=? OR friend_id=?').run(target.id,target.id);db.prepare('DELETE FROM friend_requests WHERE from_user_id=? OR to_user_id=?').run(target.id,target.id);db.prepare('DELETE FROM account_deletion_requests WHERE user_id=?').run(target.id);db.prepare('DELETE FROM resources WHERE uploader_id=?').run(target.id);db.prepare('DELETE FROM resource_folders WHERE uploader_id=?').run(target.id);db.prepare('DELETE FROM users WHERE id=?').run(target.id)
   });remove()
   for(const resource of resources){if(!resource.file_path)continue;const filePath=path.resolve(__dirname,'.'+resource.file_path);if(filePath.startsWith(path.resolve(resourceUploadDir)))await fs.unlink(filePath).catch(()=>{})}
 }
@@ -328,9 +342,35 @@ app.delete('/api/user/apikey',auth,(req,res)=>{db.prepare("UPDATE users SET api_
 app.get('/api/dashboard',auth,(req,res)=>{const id=req.user.id;res.json({user:publicUser(userOf(id)),today:db.prepare('SELECT * FROM schedules WHERE user_id=? ORDER BY start_time').all(id),plans:db.prepare("SELECT * FROM study_plans WHERE user_id=? AND status!='done' ORDER BY id DESC LIMIT 4").all(id),resourceCount:db.prepare('SELECT COUNT(*) count FROM resources').get().count,friendCount:db.prepare('SELECT COUNT(*) count FROM friendships WHERE user_id=?').get(id).count,agentMemory:db.prepare('SELECT content FROM agent_memories WHERE user_id=? AND memory_key=?').get(id,'learning_profile')?.content||''})})
 app.get('/api/courses',auth,(req,res)=>res.json(db.prepare('SELECT c.*, (SELECT COUNT(*) FROM resources r WHERE r.course_id=c.id) resource_count FROM courses c ORDER BY c.id').all()))
 app.get('/api/resources/files/:fileName',(req,res)=>{const fileName=path.basename(req.params.fileName);if(fileName!==req.params.fileName)return res.status(404).end();const filePath=path.join(resourceUploadDir,fileName);res.sendFile(filePath,error=>{if(error&&!res.headersSent)res.status(error.code==='ENOENT'?404:500).json({error:'资料文件不存在或暂时无法打开'})})})
-app.get('/api/resources',auth,(req,res)=>{const query=(req.query.query||'').trim(),courseId=Number(req.query.course_id||0);let sql="SELECT r.*,c.name course_name,u.name uploader_name,COALESCE(d.status,CASE WHEN r.file_path!='' THEN 'pending' ELSE 'not_applicable' END) ingestion_status,COALESCE(d.error_message,'') ingestion_error,COALESCE(d.chunk_count,0) chunk_count FROM resources r JOIN courses c ON c.id=r.course_id LEFT JOIN users u ON u.id=r.uploader_id LEFT JOIN resource_documents d ON d.resource_id=r.id WHERE 1=1",values=[];if(courseId){sql+=' AND r.course_id=?';values.push(courseId)}if(query){sql+=' AND (r.title LIKE ? OR r.description LIKE ? OR r.tags LIKE ? OR r.file_name LIKE ?)';values.push(`%${query}%`,`%${query}%`,`%${query}%`,`%${query}%`)}res.json(db.prepare(`${sql} ORDER BY r.is_pinned DESC,r.id DESC`).all(...values))})
+app.get('/api/resources',auth,(req,res)=>{const query=(req.query.query||'').trim(),courseId=Number(req.query.course_id||0);let sql="SELECT r.*,c.name course_name,u.name uploader_name,f.name folder_name,COALESCE(d.status,CASE WHEN r.file_path!='' THEN 'pending' ELSE 'not_applicable' END) ingestion_status,COALESCE(d.error_message,'') ingestion_error,COALESCE(d.chunk_count,0) chunk_count FROM resources r JOIN courses c ON c.id=r.course_id LEFT JOIN users u ON u.id=r.uploader_id LEFT JOIN resource_folders f ON f.id=r.folder_id LEFT JOIN resource_documents d ON d.resource_id=r.id WHERE 1=1",values=[];if(courseId){sql+=' AND r.course_id=?';values.push(courseId)}if(query){sql+=' AND (r.title LIKE ? OR r.description LIKE ? OR r.tags LIKE ? OR r.file_name LIKE ? OR f.name LIKE ? OR r.relative_path LIKE ?)';values.push(`%${query}%`,`%${query}%`,`%${query}%`,`%${query}%`,`%${query}%`,`%${query}%`)}res.json(db.prepare(`${sql} ORDER BY r.is_pinned DESC,r.folder_id DESC,r.relative_path ASC,r.id DESC`).all(...values))})
 app.post('/api/resources',auth,(req,res)=>{const {course_id,title,description='',type='note',tags='',url=''}=req.body;if(!course_id||!title)return res.status(400).json({error:'请选择课程并填写资料标题'});const result=db.prepare('INSERT INTO resources (course_id,title,description,type,tags,url,uploader_id) VALUES (?,?,?,?,?,?,?)').run(course_id,title.trim(),description.trim(),type,tags.trim(),url.trim(),req.user.id);res.status(201).json({id:result.lastInsertRowid,message:'链接资料已发布'})})
 app.post('/api/resources/upload',auth,resourceUpload.single('file'),async(req,res)=>{const courseId=Number(req.body.course_id||0),file=req.file,title=String(req.body.title||'').trim(),description=String(req.body.description||'').trim(),tags=String(req.body.tags||'').trim(),type=String(req.body.type||'note').trim();if(!courseId||!db.prepare('SELECT 1 FROM courses WHERE id=?').get(courseId))return res.status(400).json({error:'请选择有效课程'});if(!file)return res.status(400).json({error:'请选择要上传的资料文件'});const originalName=readableUploadName(file.originalname),ext=path.extname(originalName).toLowerCase(),safeName=`${crypto.randomUUID()}${ext}`,filePath=path.join(resourceUploadDir,safeName);try{await fs.mkdir(resourceUploadDir,{recursive:true});await fs.writeFile(filePath,file.buffer);const result=db.prepare('INSERT INTO resources (course_id,title,description,type,tags,file_path,file_name,file_size,uploader_id) VALUES (?,?,?,?,?,?,?,?,?)').run(courseId,(title||path.basename(originalName,ext)).slice(0,100),description.slice(0,2000),type.slice(0,30),tags.slice(0,300),`/api/resources/files/${safeName}`,originalName.slice(0,255),file.size,req.user.id);queueResourceIndex(Number(result.lastInsertRowid));res.status(201).json({id:result.lastInsertRowid,message:'资料文件已上传，正在建立 AI 检索索引'})}catch(error){try{await fs.unlink(filePath)}catch{};res.status(500).json({error:'文件保存失败，请稍后重试'})}})
+app.post('/api/resources/upload-folder',auth,resourceFolderUpload.array('files',60),async(req,res)=>{
+  const courseId=Number(req.body.course_id||0),files=req.files||[],description=String(req.body.description||'').trim(),tags=String(req.body.tags||'').trim(),type=String(req.body.type||'note').trim()
+  if(!courseId||!db.prepare('SELECT 1 FROM courses WHERE id=?').get(courseId))return res.status(400).json({error:'请选择有效课程'})
+  if(!files.length)return res.status(400).json({error:'请先选择包含课程资料的文件夹'})
+  let relativePaths=[];try{relativePaths=JSON.parse(req.body.relative_paths||'[]')}catch{relativePaths=[]}
+  const proposed=String(req.body.folder_name||req.body.title||'课程资料文件夹').trim()
+  const folderName=proposed.slice(0,100)||'课程资料文件夹',saved=[]
+  try {
+    await fs.mkdir(resourceUploadDir,{recursive:true})
+    for (const [index,file] of files.entries()) {
+      const originalName=readableUploadName(file.originalname),ext=path.extname(originalName).toLowerCase(),safeName=`${crypto.randomUUID()}${ext}`
+      await fs.writeFile(path.join(resourceUploadDir,safeName),file.buffer)
+      const requested=String(relativePaths[index]||originalName).replace(/\\/g,'/').replace(/^\/+/, '')
+      const relativePath=requested.split('/').filter(part=>part&&part!=='.'&&part!=='..').join('/').slice(0,500)||originalName
+      saved.push({file,originalName,safeName,relativePath})
+    }
+    const create=db.transaction(()=>{
+      const folder=db.prepare('INSERT INTO resource_folders (course_id,name,description,tags,uploader_id,created_at) VALUES (?,?,?,?,?,?)').run(courseId,folderName,description.slice(0,2000),tags.slice(0,300),req.user.id,now())
+      const insert=db.prepare('INSERT INTO resources (course_id,title,description,type,tags,file_path,file_name,file_size,folder_id,relative_path,uploader_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+      const ids=saved.map(item=>Number(insert.run(courseId,path.basename(item.originalName,path.extname(item.originalName)).slice(0,100),description.slice(0,2000),type.slice(0,30),tags.slice(0,300),`/api/resources/files/${item.safeName}`,item.originalName.slice(0,255),item.file.size,folder.lastInsertRowid,item.relativePath,req.user.id).lastInsertRowid))
+      return {folderId:Number(folder.lastInsertRowid),ids}
+    })
+    const result=create(); result.ids.forEach(queueResourceIndex)
+    res.status(201).json({folder_id:result.folderId,uploaded:result.ids.length,message:`已上传“${folderName}”文件夹中的 ${result.ids.length} 个文件，正在建立 AI 检索索引`})
+  } catch (error) { for(const item of saved)await fs.unlink(path.join(resourceUploadDir,item.safeName)).catch(()=>{});res.status(500).json({error:'文件夹上传失败，已撤回本次已保存文件，请稍后重试'}) }
+})
 app.post('/api/resources/:id/reprocess',auth,(req,res)=>{const resource=db.prepare('SELECT * FROM resources WHERE id=?').get(req.params.id);if(!resource)return res.status(404).json({error:'资料不存在'});if(resource.uploader_id!==req.user.id&&!isAdmin(req.user.id))return res.status(403).json({error:'只能重新处理自己发布的资料'});if(!resource.file_path)return res.status(400).json({error:'链接资料不能建立正文索引，请上传资料文件'});queueResourceIndex(resource.id);res.json({message:'已开始重新解析，请稍后刷新资料列表查看状态'})})
 app.patch('/api/resources/:id/pin',auth,(req,res)=>{if(!isAdmin(req.user.id))return res.status(403).json({error:'只有管理员可以置顶资料'});const resource=db.prepare('SELECT id FROM resources WHERE id=?').get(req.params.id);if(!resource)return res.status(404).json({error:'资料不存在'});db.prepare('UPDATE resources SET is_pinned=? WHERE id=?').run(req.body.pinned?1:0,resource.id);res.json({message:req.body.pinned?'资料已置顶':'已取消置顶'})})
 app.delete('/api/resources/:id',auth,async(req,res)=>{const resource=db.prepare('SELECT * FROM resources WHERE id=?').get(req.params.id);if(!resource)return res.status(404).json({error:'资料不存在'});if(resource.uploader_id!==req.user.id&&!isAdmin(req.user.id))return res.status(403).json({error:'只能删除自己发布的资料'});const remove=db.transaction(()=>{db.prepare('DELETE FROM resource_chunks_fts WHERE resource_id=?').run(resource.id);db.prepare('DELETE FROM resource_chunks WHERE resource_id=?').run(resource.id);db.prepare('DELETE FROM resource_documents WHERE resource_id=?').run(resource.id);db.prepare('DELETE FROM resources WHERE id=?').run(resource.id)});remove();if(resource.file_path){const target=path.resolve(__dirname,'.'+resource.file_path);if(target.startsWith(path.resolve(resourceUploadDir)))try{await fs.unlink(target)}catch{}}res.json({message:'资料及其 AI 检索索引已删除'})})
