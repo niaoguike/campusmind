@@ -1,0 +1,87 @@
+/* Compact, fixed-height panels for the learning dashboard. */
+.dashboard .grid {
+  grid-template-columns: .82fr 1.18fr !important;
+  align-items: stretch;
+}
+
+.dashboard .schedule,
+.dashboard .plans {
+  height: 292px !important;
+  box-sizing: border-box;
+  overflow: hidden !important;
+}
+
+.dashboard .schedule {
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
+}
+
+.dashboard .plans {
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+.dashboard .plans header,
+.dashboard .plans .all-plans {
+  flex: none;
+}
+
+.dashboard .plans .plan-scroll {
+  height: auto !important;
+  min-height: 0;
+  flex: 1 !important;
+  margin-top: 5px;
+}
+
+.dashboard .plans .plan {
+  padding: 10px 0;
+}
+
+/* The dashboard is a preview only; plan confirmation and deletion live on /schedule. */
+.dashboard .plans .plan aside {
+  display: none !important;
+}
+
+/* Only a dot is shown for a new private or group message. */
+.collab .unread {
+  align-self: flex-start;
+  width: 9px !important;
+  min-width: 9px !important;
+  height: 9px !important;
+  margin: 5px 2px 0 5px;
+  border-radius: 50% !important;
+  background: #e45445 !important;
+  box-shadow: 0 0 0 3px #fff0e8;
+  color: transparent !important;
+  font-size: 0 !important;
+  font-style: normal;
+  flex: none;
+}
+
+/* Keep the Agent sidebar and conversation workspace aligned and independently scrollable. */
+.agent-page .threads.panel,
+.agent-page .chat.panel {
+  height: calc(100vh - 106px) !important;
+  min-height: 620px !important;
+  max-height: 840px !important;
+  box-sizing: border-box;
+}
+
+.agent-page .threads.panel {
+  display: flex !important;
+  flex-direction: column !important;
+  overflow: hidden !important;
+}
+
+.agent-page .thread-list {
+  min-height: 0 !important;
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
+  padding-right: 3px;
+}
+
+@media (max-width: 700px) {
+  .dashboard .grid { grid-template-columns: 1fr !important; }
+  .dashboard .schedule,
+  .dashboard .plans { height: 278px !important; }
+}

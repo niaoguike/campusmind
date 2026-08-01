@@ -6,7 +6,7 @@
       <div class="agent-profile"><div class="agent-mark">✦</div><div><b>知行</b><small>学习教练 · LangChain</small></div></div>
       <p class="hint">它能检索课程资料、读取你的课表与计划、生成待确认计划草稿，并记住你授权的学习偏好。</p>
       <p class="label">近期对话</p>
-      <button v-for="thread in threads" :key="thread.id" class="thread" :class="{active: thread.id===threadId}" @click="openThread(thread.id)">{{ thread.title }}</button>
+      <div class="thread-list"><button v-for="thread in threads" :key="thread.id" class="thread" :class="{active: thread.id===threadId}" @click="openThread(thread.id)">{{ thread.title }}</button></div>
     </aside>
     <section class="chat panel">
       <header><div><span class="eyebrow">PRIVATE LEARNING AGENT</span><h1>和你的学习伙伴一起进步</h1></div><span class="status">● 已连接 DeepSeek</span></header>

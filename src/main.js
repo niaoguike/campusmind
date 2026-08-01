@@ -1,6 +1,7 @@
 import { createApp } from 'vue'
 import App from './App.vue'
 import router from './router'
+import './ux-tweaks.css'
 // Element Plus
 import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
