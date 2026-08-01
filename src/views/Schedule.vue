@@ -63,7 +63,7 @@
 
       <section class="plan-section">
         <div><h2>我的计划草稿</h2><p>Agent 写入的是草稿；确认后才会进入执行状态。</p></div>
-        <article v-for="plan in plans" :key="plan.id" class="plan-card"><div><span :class="plan.status">{{ plan.status === 'active' ? '进行中' : '待确认' }}</span><b>{{ plan.title }}</b><p>{{ plan.content }}</p></div><button v-if="plan.status === 'draft'" class="primary" @click="activate(plan.id)">确认执行</button></article>
+        <article v-for="plan in plans" :key="plan.id" class="plan-card"><div><span :class="plan.status">{{ plan.status === 'active' ? '进行中' : '待确认' }}</span><b>{{ plan.title }}</b><p>{{ plan.content }}</p></div><div class="plan-actions"><button class="secondary" @click="editPlan(plan)">修改</button><button class="danger" @click="deletePlan(plan)">删除</button><button v-if="plan.status === 'draft'" class="primary" @click="activate(plan.id)">确认执行</button></div></article>
         <div v-if="!plans.length" class="empty-card">暂无计划。<router-link to="/home">去让 Agent 帮你安排</router-link></div>
       </section>
     </main>
@@ -106,7 +106,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import AppNav from '../components/AppNav.vue'
 import { api, post } from '../utils/api'
 
@@ -153,6 +153,8 @@ async function load() { items.value = await api('/schedules'); plans.value = awa
 async function save() { try { await post('/schedules', form.value); dialog.value = false; form.value = { course_name: '', weekday: 1, start_time: '', end_time: '', location: '' }; await load() } catch (error) { ElMessage.error(error.message) } }
 async function remove(id) { await api(`/schedules/${id}`, { method: 'DELETE' }); await load() }
 async function activate(id) { await api(`/plans/${id}`, { method: 'PATCH', body: JSON.stringify({ status: 'active' }) }); await load() }
+async function editPlan(plan) { try { const titleResult = await ElMessageBox.prompt('修改计划标题', '编辑学习计划', { inputValue: plan.title, inputPlaceholder: '例如：完成本周复习', inputValidator: value => value.trim() ? true : '标题不能为空' }); const contentResult = await ElMessageBox.prompt('修改计划内容', '编辑学习计划', { inputValue: plan.content, inputType: 'textarea', inputRows: 8, inputPlaceholder: '写下可执行的学习任务', inputValidator: value => value.trim() ? true : '内容不能为空' }); const result = await api(`/plans/${plan.id}`, { method: 'PATCH', body: JSON.stringify({ title: titleResult.value, content: contentResult.value }) }); ElMessage.success(result.message); await load() } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error.message || '修改计划失败') } }
+async function deletePlan(plan) { try { await ElMessageBox.confirm(`确定删除“${plan.title}”吗？此操作无法恢复。`, '删除学习计划', { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }); const result = await api(`/plans/${plan.id}`, { method: 'DELETE' }); ElMessage.success(result.message); await load() } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error.message || '删除计划失败') } }
 async function uploadFile(file) { if (!file) return; if (!/\.(xlsx|xls|csv|pdf)$/i.test(file.name)) return ElMessage.warning('请选择 Excel、CSV 或 PDF 课表文件'); if (file.size > 5 * 1024 * 1024) return ElMessage.warning('课表文件不能超过 5MB'); selectedFile.value = file; importing.value = true; const data = new FormData(); data.append('file', file); try { const result = await api('/schedules/import-preview', { method: 'POST', body: data }); preview.value = result.entries; warnings.value = result.warnings || []; importToken.value = result.import_token; previewStart.value = result.semester_start || ''; previewSemester.value = result.semester_key?.replace(/(\d{4}-\d{4})-(\d)/, '$1学年第$2学期') || '' } catch (error) { ElMessage.error(error.message) } finally { importing.value = false } }
 function chooseFile(event) { uploadFile(event.target.files?.[0]) }
 function dropFile(event) { dragging.value = false; importDialog.value = true; uploadFile(event.dataTransfer.files?.[0]) }

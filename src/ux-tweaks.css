@@ -37,9 +37,43 @@
   padding: 10px 0;
 }
 
+.dashboard .plans .all-plans {
+  display: block;
+  padding: 9px 11px;
+  border-radius: 11px;
+  background: #fff0e5;
+  color: #a25332;
+  font-weight: 700;
+  text-align: center;
+  font-size: 0;
+}
+
+.dashboard .plans .all-plans::before {
+  content: '展开完整计划  →';
+  font-size: 13px;
+}
+
 /* The dashboard is a preview only; plan confirmation and deletion live on /schedule. */
 .dashboard .plans .plan aside {
   display: none !important;
+}
+
+.plan-section .plan-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.plan-section .plan-actions .danger {
+  border: 1px solid #f2c7bb;
+  border-radius: 13px;
+  padding: 10px 15px;
+  background: #fff3ef;
+  color: #b54f38;
+  font-weight: 700;
+  cursor: pointer;
 }
 
 /* Only a dot is shown for a new private or group message. */
