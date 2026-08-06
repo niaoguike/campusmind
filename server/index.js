@@ -17,6 +17,7 @@ import multer from 'multer'
 import XLSX from 'xlsx'
 import { extractResourceChunks, searchKnowledgeChunks } from './services/resourceRag.js'
 import { createAgentExport } from './services/agentExport.js'
+import { artifactPlanMarkdown, designLearningArtifact } from './services/artifactPlanner.js'
 
 dotenv.config()
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -294,6 +295,9 @@ if (!db.prepare("SELECT 1 FROM announcements WHERE title='Agent 附件学习已�
 }
 if (!db.prepare("SELECT 1 FROM announcements WHERE title='Agent 文档与演示导出已上线' LIMIT 1").get()) {
   db.prepare('INSERT INTO announcements (title,content,is_pinned,author_id,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('Agent 文档与演示导出已上线','专属 Agent 现可根据当前对话生成 Word 学习报告、PDF 学习报告、PPT 学习汇报、Markdown 笔记及知识卡片。直接在对话中说“生成 PPT / Word / PDF”即可下载。',0,null,now(),now())
+}
+if (!db.prepare("SELECT 1 FROM announcements WHERE title='Agent 专业成果生成已上线' LIMIT 1").get()) {
+  db.prepare('INSERT INTO announcements (title,content,is_pinned,author_id,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('Agent 专业成果生成已上线','我的 Agent 新增“专业生成成果”面板。选择 PPT、Word 或 PDF 后，可设置页数、课程复习/课堂汇报/大创答辩场景与侧重点；Agent 会先重新设计结构，再生成可下载文件。',0,null,now(),now())
 }
 db.prepare("UPDATE resources SET file_path=REPLACE(file_path,'/uploads/resources/','/api/resources/files/') WHERE file_path LIKE '/uploads/resources/%'").run()
 for (const row of db.prepare("SELECT id,file_name FROM resources WHERE file_name!=''").all()) { const fixed=readableUploadName(row.file_name); if(fixed!==row.file_name) db.prepare('UPDATE resources SET file_name=? WHERE id=?').run(fixed,row.id) }
@@ -579,6 +583,30 @@ function requestedExportMode (content = '') { const text = String(content).toLow
 async function saveAgentExport (threadId, userId, mode, title, content) { const exportInfo = await createAgentExport({ mode, title, content, directory: agentUploadDir, id: crypto.randomUUID() }); const result = db.prepare('INSERT INTO agent_attachments (user_id,thread_id,file_name,file_path,mime_type,file_size,created_at) VALUES (?,?,?,?,?,?,?)').run(userId,threadId,exportInfo.fileName,exportInfo.savedName,exportInfo.mime,exportInfo.size,now()); return publicAgentAttachment(db.prepare('SELECT * FROM agent_attachments WHERE id=?').get(result.lastInsertRowid)) }
 app.post('/api/agent/attachments',auth,agentAttachmentUpload.single('file'),async(req,res)=>{const file=req.file;let threadId=Number(req.body.thread_id||0);if(!file)return res.status(400).json({error:'请选择要上传的文件或图片'});if(!threadId)threadId=Number(db.prepare('INSERT INTO agent_threads (user_id,title) VALUES (?,?)').run(req.user.id,'带附件的学习对话').lastInsertRowid);if(!db.prepare('SELECT 1 FROM agent_threads WHERE id=? AND user_id=?').get(threadId,req.user.id))return res.status(403).json({error:'无权使用该对话'});const originalName=readableUploadName(file.originalname),safeName=`${crypto.randomUUID()}${path.extname(originalName).toLowerCase()}`,savedPath=path.join(agentUploadDir,safeName);let extracted='';try{await fs.mkdir(agentUploadDir,{recursive:true});await fs.writeFile(savedPath,file.buffer);if(!/^image\//i.test(file.mimetype||'')){const chunks=await extractResourceChunks(originalName,file.buffer).catch(()=>[]);extracted=chunks.map(item=>item.content).join('\n').slice(0,12000)}const result=db.prepare('INSERT INTO agent_attachments (user_id,thread_id,file_name,file_path,mime_type,file_size,extracted_text,created_at) VALUES (?,?,?,?,?,?,?,?)').run(req.user.id,threadId,originalName.slice(0,255),safeName,file.mimetype||'',file.size,extracted,now());const attachment=publicAgentAttachment(db.prepare('SELECT * FROM agent_attachments WHERE id=?').get(result.lastInsertRowid));res.status(201).json({thread_id:threadId,attachment,readable:!!extracted,message:extracted?'附件已上传，Agent 可读取其中的文本内容':'附件已上传；图片会作为附件保留，当前文本模型会依据你的文字说明进行分析'})}catch(error){await fs.unlink(savedPath).catch(()=>{});res.status(500).json({error:'附件保存或解析失败，请稍后重试'})}})
 app.get('/api/agent/attachments/:id/download',auth,(req,res)=>{const attachment=db.prepare('SELECT * FROM agent_attachments WHERE id=? AND user_id=?').get(req.params.id,req.user.id);if(!attachment)return res.status(404).json({error:'附件不存在或无权访问'});const filePath=path.join(agentUploadDir,path.basename(attachment.file_path));res.type(attachment.mime_type||'application/octet-stream');res.sendFile(filePath,error=>{if(error&&!res.headersSent)res.status(error.code==='ENOENT'?404:500).json({error:'附件文件不存在'})})})
+app.post('/api/agent/threads/:id/generate-artifact',auth,async(req,res)=>{
+  const threadId=Number(req.params.id),mode=String(req.body.mode||'ppt')
+  if(!['ppt','word','pdf'].includes(mode))return res.status(400).json({error:'专业成果仅支持 PPT、Word 或 PDF'})
+  if(!db.prepare('SELECT 1 FROM agent_threads WHERE id=? AND user_id=?').get(threadId,req.user.id))return res.status(403).json({error:'无权使用该对话'})
+  const user=userOf(req.user.id)
+  if(!user?.api_key)return res.status(400).json({error:'NO_API_KEY',message:'请先在模型设置中绑定 DeepSeek API Key'})
+  const conversation=db.prepare('SELECT role,content FROM agent_messages WHERE thread_id=? ORDER BY id DESC LIMIT 18').all(threadId).reverse().map(item=>`${item.role==='user'?'学生':'Agent'}：${item.content}`).join('\n\n')
+  if(!conversation.trim())return res.status(400).json({error:'请先在当前对话中获得一些学习内容，再生成专业成果'})
+  try {
+    const modelName=SUPPORTED_DEEPSEEK_MODELS.has(user.model_type)?user.model_type:'deepseek-v4-flash'
+    const plan=await designLearningArtifact({apiKey:decryptSecret(user.api_key),model:modelName,mode,pages:req.body.pages,style:req.body.style,focus:req.body.focus,conversation})
+    const attachment=await saveAgentExport(threadId,user.id,mode,plan.title,artifactPlanMarkdown(plan,mode))
+    const label={ppt:'PPT',word:'Word 学习报告',pdf:'PDF 学习报告'}[mode]
+    const message=`已由成果生成 Agent 重新设计并生成 ${label}：${plan.title}（${plan.style}，${plan.totalPages} 页/段）。`
+    db.prepare("INSERT INTO agent_messages (thread_id,role,content,attachments_json) VALUES (?,?,?,?)").run(threadId,'assistant',message,JSON.stringify([attachment]))
+    db.prepare('UPDATE agent_threads SET updated_at=? WHERE id=?').run(now(),threadId)
+    res.status(201).json({message,attachment,plan:{title:plan.title,total_pages:plan.totalPages,style:plan.style}})
+  } catch(error) {
+    console.error('Professional artifact generation error:',error?.message)
+    const status=Number(error.status)||500
+    const message=status===401?'DeepSeek API Key 无效，请在模型设置中重新保存。':status===429?'DeepSeek 请求过于频繁或额度不足，请稍后再试。':status>=500&&status<600?'DeepSeek 服务暂时不可用，请稍后重试。':'专业成果生成失败，请检查模型配置后重试。'
+    res.status(status===401||status===429?status:502).json({error:message})
+  }
+})
 app.post('/api/agent/threads/:id/generate-output',auth,async(req,res)=>{const threadId=Number(req.params.id),mode=req.body.mode==='file'?'markdown':req.body.mode;if(!['markdown','word','pdf','ppt','image'].includes(mode))return res.status(400).json({error:'输出类型不正确'});if(!db.prepare('SELECT 1 FROM agent_threads WHERE id=? AND user_id=?').get(threadId,req.user.id))return res.status(403).json({error:'无权使用该对话'});const source=db.prepare("SELECT content FROM agent_messages WHERE thread_id=? AND role='assistant' ORDER BY id DESC LIMIT 1").get(threadId);if(!source)return res.status(400).json({error:'请先获得 Agent 的回答，再生成文件或图片'});try{let attachment,message;if(mode==='image'){const safeName=`${crypto.randomUUID()}.svg`,fileName=`知识卡片-${Date.now()}.svg`,body=studyCardSvg('本次学习知识卡片',source.content);await fs.mkdir(agentUploadDir,{recursive:true});await fs.writeFile(path.join(agentUploadDir,safeName),body,'utf8');const result=db.prepare('INSERT INTO agent_attachments (user_id,thread_id,file_name,file_path,mime_type,file_size,created_at) VALUES (?,?,?,?,?,?,?)').run(req.user.id,threadId,fileName,safeName,'image/svg+xml',Buffer.byteLength(body),now());attachment=publicAgentAttachment(db.prepare('SELECT * FROM agent_attachments WHERE id=?').get(result.lastInsertRowid));message='已根据当前回答生成知识卡片图片。'}else{attachment=await saveAgentExport(threadId,req.user.id,mode,'本次学习资料',source.content);message={markdown:'已生成可下载学习笔记。',word:'已生成可下载 Word 学习报告。',pdf:'已生成可下载 PDF 学习报告。',ppt:'已生成可下载 PPT 学习汇报。'}[mode]}db.prepare("INSERT INTO agent_messages (thread_id,role,content,attachments_json) VALUES (?,?,?,?)").run(threadId,'assistant',message,JSON.stringify([attachment]));db.prepare('UPDATE agent_threads SET updated_at=? WHERE id=?').run(now(),threadId);res.status(201).json({message,attachment})}catch(error){console.error('Agent export error:',error);const message=error.code==='PDF_FONT_UNAVAILABLE'?'PDF 生成功能尚未配置中文字体。请联系管理员安装 fonts-droid-fallback，并在 server/.env 配置 PDF_FONT_PATH=/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf。':'生成输出文件失败，请稍后重试';res.status(500).json({error:message})}})
 app.get('/api/agent/threads',auth,(req,res)=>res.json(db.prepare('SELECT * FROM agent_threads WHERE user_id=? ORDER BY updated_at DESC').all(req.user.id)))
 app.post('/api/agent/threads',auth,(req,res)=>{const result=db.prepare('INSERT INTO agent_threads (user_id,title) VALUES (?,?)').run(req.user.id,(req.body.title||'新的学习对话').slice(0,50));res.status(201).json({id:result.lastInsertRowid})})
