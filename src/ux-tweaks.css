@@ -114,6 +114,15 @@
   padding-right: 3px;
 }
 
+.agent-page .output-tools::after {
+  content: '也可以直接说：生成 PPT、Word 或 PDF';
+  display: block;
+  width: 100%;
+  padding-top: 3px;
+  color: #a88373;
+  font-size: 11px;
+}
+
 @media (max-width: 700px) {
   .dashboard .grid { grid-template-columns: 1fr !important; }
   .dashboard .schedule,
