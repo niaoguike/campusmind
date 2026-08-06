@@ -19,5 +19,5 @@ const isImage = computed(() => !failed.value && /^(\/api\/avatars\/|https?:\/\/|
 </script>
 
 <style scoped>
-.avatar-badge{display:grid;width:100%;height:100%;place-items:center;overflow:hidden}.avatar-badge img{display:block;width:100%;height:100%;object-fit:cover}
+.avatar-badge{display:grid;width:100%;height:100%;place-items:center;overflow:hidden;border-radius:inherit}.avatar-badge img{display:block;width:100%;height:100%;object-fit:cover;border-radius:inherit}
 </style>

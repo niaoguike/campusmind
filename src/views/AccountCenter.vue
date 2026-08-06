@@ -4,7 +4,7 @@
     <main class="account-page">
       <section class="hero"><p class="eyebrow">ACCOUNT CENTER</p><h1>个人主页与账户安全</h1><p>管理你的学习身份、模型资料和账户安全设置。</p></section>
       <section class="profile-card">
-        <div class="avatar">{{ profile.avatar || '🌱' }}</div>
+        <div class="avatar"><AvatarBadge :value="profile.avatar || '🌱'" :alt="profile.name" /></div>
         <div><h2>{{ profile.name }}</h2><p>{{ profile.student_id }} · {{ profile.college }} · {{ profile.class }}</p></div>
         <button class="profile-link" @click="router.push(`/profile/${profile.id}`)">编辑个人与 Agent 资料</button>
       </section>
@@ -35,6 +35,7 @@ import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import AppNav from '../components/AppNav.vue'
+import AvatarBadge from '../components/AvatarBadge.vue'
 import { api } from '../utils/api'
 
 const router = useRouter()
@@ -53,4 +54,5 @@ onMounted(load)
 
 <style scoped>
 .page-shell{min-height:100vh;background:#fffaf6}.account-page{width:min(960px,92vw);margin:0 auto;padding:46px 0 80px}.hero{margin-bottom:24px}.eyebrow{font-size:11px;letter-spacing:1.4px;font-weight:800;color:#bd7558;margin:0 0 7px}.hero h1{margin:0;color:#603c2c;font-size:32px}.hero>p:last-child{color:#977b6c}.profile-card,.danger-card{display:flex;align-items:center;gap:18px;padding:25px 28px;border-radius:22px;background:#fffdfb;border:1px solid #efded4;box-shadow:0 9px 25px #7f493112;margin-bottom:18px}.avatar{display:grid;place-items:center;width:58px;height:58px;border-radius:18px;background:#fde6d6;font-size:30px}.profile-card h2,.danger-card h2{margin:0 0 7px;color:#6a4333}.profile-card p,.danger-card p{margin:0;color:#917467;line-height:1.65}.profile-link{margin-left:auto;background:#f7e7dc;border:0;border-radius:13px;padding:11px 14px;color:#9f4c2b;font-weight:800}.danger-card{align-items:flex-end;background:#fff8f5;border-color:#f0cfc4}.danger-card>div{flex:1}.danger-eyebrow{color:#bd593d}.pending{margin-top:12px!important;color:#a7553b!important;font-weight:700}.danger-button,.secondary{border:0;border-radius:13px;padding:11px 16px;font-weight:800;cursor:pointer;white-space:nowrap}.danger-button{background:#bc5639;color:#fff}.danger-button:disabled{opacity:.5;cursor:not-allowed}.secondary{background:#f4e7df;color:#805d4e;margin-right:9px}.warning-box{padding:12px 14px;margin-bottom:15px;border-radius:13px;background:#fff0e8;color:#8c513c;line-height:1.6}.dialog-form{margin-top:14px}@media(max-width:650px){.profile-card,.danger-card{align-items:flex-start;flex-wrap:wrap}.profile-link{margin-left:0}.danger-card>button{width:100%}}
+.avatar{overflow:hidden}
 </style>
