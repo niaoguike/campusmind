@@ -1,0 +1,33 @@
+<template>
+  <div class="page"><AppNav /><main class="profile-wrap"><section class="profile-card">
+    <div class="hero"><div class="avatar big" :class="{ agent: showingAgent }"><AvatarBadge :value="showingAgent ? profile.agent_avatar : profile.avatar" :alt="showingAgent ? `${profile.name} 的 Agent` : profile.name" /></div><div><span class="eyebrow">{{ showingAgent ? 'PERSONAL LEARNING AGENT' : 'LEARNER PROFILE' }}</span><h1>{{ showingAgent ? profile.agent_name : profile.name }}</h1><p v-if="showingAgent" class="owner">{{ profile.name }} 的 Agent</p><p v-else>{{ profile.college }} · {{ profile.class }}</p></div></div>
+    <div class="bio">{{ profile.bio || (showingAgent ? '我会陪伴主人整理学习目标、规划任务并解答课程问题。' : '这个同学还没有填写个人介绍。') }}</div>
+    <div v-if="isMe" class="editor"><h2>个性化设置</h2><el-tabs v-model="editTab">
+      <el-tab-pane label="我的主页" name="user"><div class="upload-row"><div class="preview"><AvatarBadge :value="draft.avatar" :alt="profile.name" /></div><div><b>个人头像</b><p>支持 PNG、JPG、WebP，最大 3MB。</p><input ref="userAvatarInput" class="hidden" type="file" accept="image/png,image/jpeg,image/webp" @change="uploadAvatar('user', $event)"><button class="soft" :disabled="uploading" @click="userAvatarInput?.click()">{{ uploading === 'user' ? '上传中…' : '上传图片' }}</button></div></div><div class="choices"><button v-for="item in userAvatars" :key="item" :class="{ picked: draft.avatar === item }" @click="draft.avatar = item">{{ item }}</button></div><el-input v-model="draft.bio" type="textarea" :rows="3" maxlength="280" show-word-limit placeholder="写一句自己的学习介绍" /></el-tab-pane>
+      <el-tab-pane label="我的 Agent" name="agent"><label>Agent 名称</label><el-input v-model="draft.agent_name" maxlength="24" placeholder="例如：知行、阿程、小助教" /><div class="upload-row"><div class="preview agent-preview"><AvatarBadge :value="draft.agent_avatar" :alt="`${profile.name} 的 Agent`" /></div><div><b>Agent 头像</b><p>可以上传任意喜欢的图片；在聊天和群聊中同步展示。</p><input ref="agentAvatarInput" class="hidden" type="file" accept="image/png,image/jpeg,image/webp" @change="uploadAvatar('agent', $event)"><button class="soft" :disabled="uploading" @click="agentAvatarInput?.click()">{{ uploading === 'agent' ? '上传中…' : '上传图片' }}</button></div></div><div class="choices"><button v-for="item in agentAvatars" :key="item" :class="{ picked: draft.agent_avatar === item }" @click="draft.agent_avatar = item">{{ item }}</button></div><p class="hint">无论名称如何，在协作页面都会标注“{{ profile.name }} 的 Agent”。</p></el-tab-pane>
+    </el-tabs><button class="primary save" @click="save">保存资料</button></div>
+  </section></main></div>
+</template>
+
+<script setup>
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
+import { ElMessage } from 'element-plus'
+import AppNav from '../components/AppNav.vue'
+import AvatarBadge from '../components/AvatarBadge.vue'
+import { api } from '../utils/api'
+
+const route = useRoute(), profile = ref({}), draft = ref({}), editTab = ref('user'), uploading = ref('')
+const userAvatarInput = ref(null), agentAvatarInput = ref(null)
+const userAvatars = ['🌿','🌸','🐰','🍊','🌙','🦋','🐼','🎓'], agentAvatars = ['✦','🤖','🧠','📎','🪴','🛰️','📚','🦉']
+const showingAgent = computed(() => route.query.agent === '1'), isMe = computed(() => profile.value.is_me)
+function applyUser (user) { profile.value = { ...user, is_me: profile.value.is_me }; draft.value = { avatar: user.avatar || '🌿', bio: user.bio || '', agent_name: user.agent_name || '知行', agent_avatar: user.agent_avatar || '✦' }; localStorage.setItem('user', JSON.stringify(user)) }
+async function load () { const data = await api(`/users/${route.params.id}/profile`); profile.value = { ...data.user, is_me: data.is_me }; draft.value = { avatar: data.user.avatar || '🌿', bio: data.user.bio || '', agent_name: data.user.agent_name || '知行', agent_avatar: data.user.agent_avatar || '✦' } }
+async function uploadAvatar (kind, event) { const file = event.target.files?.[0]; if (!file) return; if (file.size > 3 * 1024 * 1024) { ElMessage.warning('头像图片不能超过 3MB'); event.target.value = ''; return }; uploading.value = kind; const body = new FormData(); body.append('file', file); body.append('kind', kind); try { const data = await api('/user/avatar', { method: 'POST', body }); applyUser(data.user); ElMessage.success(data.message) } catch (error) { ElMessage.error(error.message) } finally { uploading.value = ''; event.target.value = '' } }
+async function save () { try { const data = await api('/user/profile', { method: 'PATCH', body: JSON.stringify(draft.value) }); applyUser(data.user); ElMessage.success('个人与 Agent 资料已保存') } catch (error) { ElMessage.error(error.message) } }
+watch(() => route.params.id, () => load().catch(error => ElMessage.error(error.message))); onMounted(() => load().catch(error => ElMessage.error(error.message)))
+</script>
+
+<style scoped>
+.profile-wrap{max-width:820px;margin:auto;padding:42px 5vw}.profile-card{background:#fffdfa;border:1px solid #f1e2d8;border-radius:28px;padding:36px;box-shadow:0 14px 35px #9f4c2b12}.hero{display:flex;gap:20px;align-items:center}.avatar{background:#f7dfca;color:#9f4c2b;border-radius:50%;display:inline-grid;place-items:center}.avatar.big{width:82px;height:82px;font-size:40px}.avatar.agent{background:#ecdff4;color:#745288}.eyebrow{font-size:11px;letter-spacing:1.2px;color:#b18b78;font-weight:800}.hero h1{margin:5px 0;color:#633c2c;font-size:30px}.hero p{margin:0;color:#9a7b6c}.owner{color:#9f4c2b!important;font-weight:700}.bio{margin:30px 0;padding:18px;background:#fff6ef;border-radius:18px;color:#735548;line-height:1.7}.editor{border-top:1px solid #f1e2d8;padding-top:22px}.editor h2{color:#704330;font-size:19px}.choices{display:flex;gap:8px;flex-wrap:wrap;margin:15px 0}.choices button{width:42px;height:42px;font-size:21px;border:1px solid #f0dccf;background:#fffaf6;border-radius:14px;cursor:pointer}.choices .picked{border-color:#c96d42;background:#fff0e4;box-shadow:0 0 0 2px #c96d4230}.editor label{font-size:13px;color:#876c5e;display:block;margin:8px 0}.hint,.upload-row p{font-size:12px;color:#a48677}.upload-row{display:flex;align-items:center;gap:14px;margin:15px 0;padding:12px;border-radius:16px;background:#fff7f1}.upload-row b{color:#704330}.upload-row p{margin:4px 0 8px}.preview{width:56px;height:56px;border-radius:18px;overflow:hidden;background:#fde6d6;font-size:27px}.agent-preview{background:#eee1f5}.soft,.primary{border:0;border-radius:13px;padding:10px 15px;font-weight:700;cursor:pointer}.soft{background:#f7e7dc;color:#9f4c2b}.primary{background:#c96d42;color:#fff}.soft:disabled{opacity:.6}.save{margin-top:12px}.hidden{display:none}@media(max-width:600px){.profile-wrap{padding:20px}.profile-card{padding:23px}.hero h1{font-size:25px}}
+</style>
