@@ -18,12 +18,22 @@ import XLSX from 'xlsx'
 import { extractResourceChunks, searchKnowledgeChunks } from './services/resourceRag.js'
 import { createAgentExport } from './services/agentExport.js'
 import { artifactPlanMarkdown, designLearningArtifact } from './services/artifactPlanner.js'
+import SmsClient, { SendSmsRequest } from '@alicloud/dysmsapi20170525'
+import OpenApi from '@alicloud/openapi-core'
 
 dotenv.config()
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const JWT_SECRET = process.env.JWT_SECRET || 'change-this-in-production'
 const KEY_SECRET = process.env.LLM_CONFIG_ENCRYPTION_KEY || JWT_SECRET
 const SUPPORTED_DEEPSEEK_MODELS = new Set(['deepseek-v4-flash', 'deepseek-v4-pro'])
+const SMS_CONFIG = {
+  accessKeyId: (process.env.ALIBABA_CLOUD_ACCESS_KEY_ID || '').trim(),
+  accessKeySecret: (process.env.ALIBABA_CLOUD_ACCESS_KEY_SECRET || '').trim(),
+  signName: (process.env.ALIYUN_SMS_SIGN_NAME || '').trim(),
+  templateCode: (process.env.ALIYUN_SMS_TEMPLATE_CODE || '').trim()
+}
+const smsEnabled = Object.values(SMS_CONFIG).every(Boolean)
+let smsClient = null
 const db = new Database(path.join(__dirname, 'data.db'))
 db.pragma('journal_mode = WAL')
 const now = () => new Date().toISOString()
@@ -228,6 +238,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS announcements (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, content TEXT NOT NULL, is_pinned INTEGER DEFAULT 0, author_id INTEGER, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS account_deletion_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL UNIQUE, status TEXT DEFAULT 'pending', note TEXT DEFAULT '', requested_at TEXT DEFAULT (datetime('now')), reviewed_by INTEGER, reviewed_at TEXT DEFAULT '');
   CREATE TABLE IF NOT EXISTS admin_audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, actor_id INTEGER, action TEXT NOT NULL, target_user_id INTEGER, target_student_id TEXT DEFAULT '', detail TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')));
+  CREATE TABLE IF NOT EXISTS sms_verifications (id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, attempts INTEGER DEFAULT 0, sent_at INTEGER NOT NULL, consumed_at INTEGER DEFAULT 0);
   CREATE TABLE IF NOT EXISTS resource_documents (resource_id INTEGER PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending', error_message TEXT DEFAULT '', chunk_count INTEGER DEFAULT 0, processed_at TEXT DEFAULT '');
   CREATE TABLE IF NOT EXISTS resource_chunks (id INTEGER PRIMARY KEY AUTOINCREMENT, resource_id INTEGER NOT NULL, chunk_index INTEGER NOT NULL, content TEXT NOT NULL, page_number INTEGER, UNIQUE(resource_id, chunk_index));
 `)
@@ -270,6 +281,36 @@ for (const [name, teacher, color] of [
 
 function hashPassword(value) { const salt=crypto.randomBytes(16).toString('hex'); return `scrypt$${salt}$${crypto.scryptSync(value,salt,64).toString('hex')}` }
 function passwordMatches(value, stored) { if (!stored.startsWith('scrypt$')) return value===stored; const [,salt,hash]=stored.split('$'); return crypto.timingSafeEqual(Buffer.from(hash,'hex'),crypto.scryptSync(value,salt,64)) }
+const validPhone = value => /^1[3-9]\d{9}$/.test(String(value || '').trim())
+const verificationHash = (phone, purpose, code) => crypto.createHmac('sha256', JWT_SECRET).update(`${phone}:${purpose}:${code}`).digest('hex')
+function tokenForUser (row) { return jwt.sign({id:row.id,student_id:row.student_id,name:row.name},JWT_SECRET,{expiresIn:'7d'}) }
+function smsClientOf () { if (!smsClient) smsClient=new SmsClient(new OpenApi.Config({ accessKeyId: SMS_CONFIG.accessKeyId, accessKeySecret: SMS_CONFIG.accessKeySecret, endpoint: 'dysmsapi.aliyuncs.com' })); return smsClient }
+async function sendVerificationSms (phone, code) {
+  if (!smsEnabled) { const error=new Error('短信服务尚未配置，请联系平台管理员完成阿里云短信签名、模板与密钥配置'); error.status=503; throw error }
+  try {
+    const response=await smsClientOf().sendSms(new SendSmsRequest({ phoneNumbers: phone, signName: SMS_CONFIG.signName, templateCode: SMS_CONFIG.templateCode, templateParam: JSON.stringify({ code }) }))
+    if (response.body?.code && response.body.code !== 'OK') { const error=new Error(response.body.message || '短信服务拒绝发送'); error.status=502; throw error }
+  } catch (cause) {
+    const error=new Error(cause?.message || '短信发送失败，请稍后重试'); error.status=cause?.status || 502; throw error
+  }
+}
+async function createVerification (phone, purpose) {
+  const stamp=Date.now(), latest=db.prepare('SELECT sent_at FROM sms_verifications WHERE phone=? AND purpose=? ORDER BY id DESC LIMIT 1').get(phone,purpose)
+  if (latest && stamp-latest.sent_at<60_000) { const error=new Error('验证码已发送，请稍后再试'); error.status=429; throw error }
+  const code=String(crypto.randomInt(0,1_000_000)).padStart(6,'0')
+  await sendVerificationSms(phone,code)
+  db.prepare('UPDATE sms_verifications SET consumed_at=? WHERE phone=? AND purpose=? AND consumed_at=0').run(stamp,phone,purpose)
+  db.prepare('INSERT INTO sms_verifications (phone,purpose,code_hash,expires_at,attempts,sent_at) VALUES (?,?,?,?,0,?)').run(phone,purpose,verificationHash(phone,purpose,code),stamp+5*60_000,stamp)
+}
+function consumeVerification (phone, purpose, code) {
+  const row=db.prepare('SELECT * FROM sms_verifications WHERE phone=? AND purpose=? AND consumed_at=0 ORDER BY id DESC LIMIT 1').get(phone,purpose)
+  if (!row || row.expires_at<Date.now()) return { ok:false, error:'验证码无效或已过期，请重新获取' }
+  if (row.attempts>=5) return { ok:false, error:'验证码错误次数过多，请重新获取' }
+  const expected=Buffer.from(row.code_hash,'hex'), actual=Buffer.from(verificationHash(phone,purpose,code),'hex')
+  if (expected.length!==actual.length || !crypto.timingSafeEqual(expected,actual)) { db.prepare('UPDATE sms_verifications SET attempts=attempts+1 WHERE id=?').run(row.id); return { ok:false, error:'验证码不正确' } }
+  db.prepare('UPDATE sms_verifications SET consumed_at=? WHERE id=?').run(Date.now(),row.id)
+  return { ok:true }
+}
 function keyMaterial() { return crypto.createHash('sha256').update(KEY_SECRET).digest() }
 function encryptSecret(value) { const iv=crypto.randomBytes(12), cipher=crypto.createCipheriv('aes-256-gcm',keyMaterial(),iv), data=Buffer.concat([cipher.update(value,'utf8'),cipher.final()]), tag=cipher.getAuthTag(); return `v1:${iv.toString('base64')}:${tag.toString('base64')}:${data.toString('base64')}` }
 function decryptSecret(value) { if (!value || !value.startsWith('v1:')) return value||''; const [,iv,tag,data]=value.split(':'), decipher=crypto.createDecipheriv('aes-256-gcm',keyMaterial(),Buffer.from(iv,'base64')); decipher.setAuthTag(Buffer.from(tag,'base64')); return Buffer.concat([decipher.update(Buffer.from(data,'base64')),decipher.final()]).toString('utf8') }
@@ -307,6 +348,9 @@ if (!db.prepare("SELECT 1 FROM announcements WHERE title='Agent 文档与演示�
 }
 if (!db.prepare("SELECT 1 FROM announcements WHERE title='Agent 专业成果生成已上线' LIMIT 1").get()) {
   db.prepare('INSERT INTO announcements (title,content,is_pinned,author_id,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('Agent 专业成果生成已上线','我的 Agent 新增“专业生成成果”面板。选择 PPT、Word 或 PDF 后，可设置页数、课程复习/课堂汇报/大创答辩场景与侧重点；Agent 会先重新设计结构，再生成可下载文件。',0,null,now(),now())
+}
+if (!db.prepare("SELECT 1 FROM announcements WHERE title='论坛时间与手机号验证已更新' LIMIT 1").get()) {
+  db.prepare('INSERT INTO announcements (title,content,is_pinned,author_id,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('论坛时间与手机号验证已更新','论坛帖子与评论现会显示中国标准时间。登录页新增手机号验证码登录和忘记密码入口；管理员配置阿里云短信服务后即可启用真实验证码发送。',0,null,now(),now())
 }
 db.prepare("UPDATE resources SET file_path=REPLACE(file_path,'/uploads/resources/','/api/resources/files/') WHERE file_path LIKE '/uploads/resources/%'").run()
 for (const row of db.prepare("SELECT id,file_name FROM resources WHERE file_name!=''").all()) { const fixed=readableUploadName(row.file_name); if(fixed!==row.file_name) db.prepare('UPDATE resources SET file_name=? WHERE id=?').run(fixed,row.id) }
@@ -374,7 +418,10 @@ app.delete('/api/admin/announcements/:id',auth,requireAdmin,(req,res)=>{const ol
 app.patch('/api/admin/users/:id/status',auth,requireAdmin,(req,res)=>{const target=userOf(Number(req.params.id)),status=req.body.status,confirm=req.body.confirm,confirmText=req.body.confirm_text; if(!target)return res.status(404).json({error:'用户不存在'});if(target.id===req.user.id||target.role==='admin')return res.status(403).json({error:'不能停用管理员账户'});if(!['active','disabled'].includes(status))return res.status(400).json({error:'账户状态不正确'});if(!confirm||confirmText!==(status==='disabled'?'停用账户':'启用账户'))return res.status(400).json({error:'请完成二次确认'});const reason=String(req.body.reason||'').trim().slice(0,300);db.prepare('UPDATE users SET account_status=?,disabled_reason=? WHERE id=?').run(status,status==='disabled'?reason:'',target.id);if(status==='disabled')db.prepare("UPDATE account_deletion_requests SET status='reviewed',reviewed_by=?,reviewed_at=? WHERE user_id=? AND status='pending'").run(req.user.id,now(),target.id);auditLog(req.user.id,status==='disabled'?'disable_account':'enable_account',target,reason);res.json({message:status==='disabled'?'账户已停用':'账户已恢复使用'})})
 app.delete('/api/admin/users/:id',auth,requireAdmin,async(req,res)=>{const target=userOf(Number(req.params.id)),{confirm=false,confirm_text='',reason=''}=req.body||{};if(!target)return res.status(404).json({error:'用户不存在'});if(target.id===req.user.id||target.role==='admin')return res.status(403).json({error:'不能删除管理员账户'});if(!confirm||confirm_text!=='删除账户')return res.status(400).json({error:'请完成二次确认'});await removeStudentAccount(target,req.user.id,String(reason).trim().slice(0,300)||'管理员删除账户');res.json({message:'账户及其个人数据已删除，操作已记录'})})
 app.post('/api/admin/users/:id/reset-password',auth,requireAdmin,(req,res)=>{const target=userOf(Number(req.params.id)),{temporary_password='',confirm=false,confirm_text='',reason=''}=req.body||{};if(!target)return res.status(404).json({error:'用户不存在'});if(target.id===req.user.id||target.role==='admin')return res.status(403).json({error:'不能重置管理员账户密码'});const password=String(temporary_password);if(password.length<8||password.length>128)return res.status(400).json({error:'临时密码长度应为 8 至 128 位'});if(!confirm||confirm_text!=='重置密码')return res.status(400).json({error:'请完成二次确认'});db.prepare('UPDATE users SET password=? WHERE id=?').run(hashPassword(password),target.id);auditLog(req.user.id,'reset_password',target,String(reason).trim().slice(0,300)||'管理员重置用户密码（不记录密码内容）');res.json({message:'密码已安全重置。请通过线下方式将临时密码告知用户。'})})
-app.post('/api/register',(req,res)=>{const {student_id,name,phone,college,class:className,password}=req.body;if(![student_id,name,phone,college,className,password].every(Boolean))return res.status(400).json({error:'请填写所有必填信息'});if(!/^\d{8}$/.test(student_id))return res.status(400).json({error:'学号必须为 8 位数字'});try{db.prepare('INSERT INTO users (student_id,name,phone,college,class,password) VALUES (?,?,?,?,?,?)').run(student_id.trim(),name.trim(),phone.trim(),college.trim(),className.trim(),hashPassword(password));res.json({message:'注册成功，请登录'})}catch(e){res.status(e.message.includes('UNIQUE')?409:500).json({error:e.message.includes('UNIQUE')?'该学号已注册':'注册失败'})}})
+app.post('/api/register',(req,res)=>{const {student_id,name,phone,college,class:className,password}=req.body;if(![student_id,name,phone,college,className,password].every(Boolean))return res.status(400).json({error:'请填写所有必填信息'});if(!/^\d{8}$/.test(student_id))return res.status(400).json({error:'学号必须为 8 位数字'});if(!validPhone(phone))return res.status(400).json({error:'请输入正确的 11 位中国大陆手机号'});if(db.prepare('SELECT id FROM users WHERE phone=?').get(phone.trim()))return res.status(409).json({error:'该手机号已绑定其他账户'});try{db.prepare('INSERT INTO users (student_id,name,phone,college,class,password) VALUES (?,?,?,?,?,?)').run(student_id.trim(),name.trim(),phone.trim(),college.trim(),className.trim(),hashPassword(password));res.json({message:'注册成功，请登录'})}catch(e){res.status(e.message.includes('UNIQUE')?409:500).json({error:e.message.includes('UNIQUE')?'该学号已注册':'注册失败'})}})
+app.post('/api/auth/sms/send',async(req,res)=>{const phone=String(req.body?.phone||'').trim(),purpose=String(req.body?.purpose||'');if(!validPhone(phone))return res.status(400).json({error:'请输入正确的 11 位中国大陆手机号'});if(!['login','reset'].includes(purpose))return res.status(400).json({error:'验证码用途不正确'});const account=db.prepare('SELECT id FROM users WHERE phone=? LIMIT 1').get(phone);if(!account)return res.json({message:'若该手机号已绑定账户，验证码将发送至该手机'});try{await createVerification(phone,purpose);res.json({message:'验证码已发送，5 分钟内有效'})}catch(error){res.status(error.status||500).json({error:error.message||'短信发送失败，请稍后重试'})}})
+app.post('/api/auth/sms/login',(req,res)=>{const phone=String(req.body?.phone||'').trim(),code=String(req.body?.code||'').trim();if(!validPhone(phone)||!/^\d{6}$/.test(code))return res.status(400).json({error:'请输入手机号和 6 位验证码'});const verification=consumeVerification(phone,'login',code);if(!verification.ok)return res.status(401).json({error:verification.error});const rows=db.prepare('SELECT * FROM users WHERE phone=?').all(phone);if(rows.length!==1)return res.status(401).json({error:'该手机号未绑定唯一账户，请使用学号登录或联系管理员'});const row=rows[0];if(row.account_status==='disabled')return res.status(403).json({error:'该账户已被停用，请联系平台管理员'});res.json({token:tokenForUser(row),user:publicUser(row)})})
+app.post('/api/auth/password/reset',(req,res)=>{const phone=String(req.body?.phone||'').trim(),code=String(req.body?.code||'').trim(),password=String(req.body?.password||'');if(!validPhone(phone)||!/^\d{6}$/.test(code))return res.status(400).json({error:'请输入手机号和 6 位验证码'});if(password.length<6||password.length>128)return res.status(400).json({error:'新密码长度应为 6 至 128 位'});const verification=consumeVerification(phone,'reset',code);if(!verification.ok)return res.status(401).json({error:verification.error});const rows=db.prepare('SELECT * FROM users WHERE phone=?').all(phone);if(rows.length!==1)return res.status(400).json({error:'该手机号未绑定唯一账户，请联系管理员'});db.prepare('UPDATE users SET password=? WHERE id=?').run(hashPassword(password),rows[0].id);res.json({message:'密码已重置，请使用新密码登录'})})
 app.post('/api/login',(req,res)=>{const row=db.prepare('SELECT * FROM users WHERE student_id=?').get(req.body.student_id||'');if(!row||!passwordMatches(req.body.password||'',row.password))return res.status(401).json({error:'学号或密码错误'});if(row.account_status==='disabled')return res.status(403).json({error:'该账户已被停用，请联系平台管理员'});if(!row.password.startsWith('scrypt$'))db.prepare('UPDATE users SET password=? WHERE id=?').run(hashPassword(req.body.password),row.id);if(row.api_key&&!row.api_key.startsWith('v1:')){row.api_key=encryptSecret(row.api_key);db.prepare('UPDATE users SET api_key=? WHERE id=?').run(row.api_key,row.id)}res.json({token:jwt.sign({id:row.id,student_id:row.student_id,name:row.name},JWT_SECRET,{expiresIn:'7d'}),user:publicUser(row)})})
 app.get('/api/user/profile',auth,(req,res)=>res.json(publicUser(userOf(req.user.id))))
 function savedAvatarValue (value, fallback) { const text=String(value||'').trim(); return /^\/api\/avatars\/[0-9a-f-]+\.(png|jpe?g|webp)$/i.test(text) ? text : (text.slice(0,12)||fallback) }
