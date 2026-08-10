@@ -53,7 +53,7 @@ const threads = ref([]), threadId = ref(null), messages = ref([]), input = ref('
 const artifactStudio = ref(false), artifactLoading = ref(false), artifactForm = ref({ mode: 'ppt', pages: 8, style: '课程复习', focus: '' })
 const scroll = () => nextTick(() => { if (scrollBox.value) scrollBox.value.scrollTop = scrollBox.value.scrollHeight })
 const agentLabel = type => ({ tutor: '学习导师 Agent', retrieval: '资料检索 Agent', planner: '学习计划 Agent', reflection: '学习画像 Agent', artifact: '成果生成 Agent' }[type] || myProfile.value.agent_name || '知行')
-const threadPreview = thread => String(thread.preview || thread.title || '新的学习对话').replace(/\s+/g, ' ').trim() || '新的学习对话'
+const threadPreview = thread => { const text = String(thread.preview || thread.title || '新的学习对话').replace(/\s+/g, ' ').trim() || '新的学习对话'; return text.length > 24 ? `${text.slice(0, 24)}…` : text }
 async function loadThreads () { threads.value = await api('/agent/threads'); if (!threadId.value && threads.value[0]) await openThread(threads.value[0].id) }
 async function openThread (id) { threadId.value = id; pendingAttachments.value = []; messages.value = await api(`/agent/threads/${id}/messages`); scroll() }
 async function newThread () { const data = await post('/agent/threads', {}); await loadThreads(); await openThread(data.id) }
