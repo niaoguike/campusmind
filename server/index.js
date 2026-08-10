@@ -11,13 +11,16 @@ import os from 'os'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { ChatOpenAI } from '@langchain/openai'
-import { createAgent, tool } from 'langchain'
-import { z } from 'zod'
 import multer from 'multer'
 import XLSX from 'xlsx'
 import { extractResourceChunks, searchKnowledgeChunks } from './services/resourceRag.js'
 import { createAgentExport } from './services/agentExport.js'
 import { artifactPlanMarkdown, designLearningArtifact } from './services/artifactPlanner.js'
+import { createCourseResourceSearchTool } from './agents/retrievalAgent.js'
+import { createLearningStateTools } from './agents/learningStateAgent.js'
+import { createPlanDraftTool } from './agents/plannerAgent.js'
+import { createLearningCoordinator } from './agents/coordinator.js'
+import { buildThreadHistory } from './agents/contextBuilder.js'
 import SmsClient, { SendSmsRequest } from '@alicloud/dysmsapi20170525'
 import OpenApi from '@alicloud/openapi-core'
 
@@ -218,7 +221,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS quizzes (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, thread_id INTEGER, course_id INTEGER, topic TEXT NOT NULL, title TEXT NOT NULL, quiz_json TEXT NOT NULL, answers_json TEXT DEFAULT '{}', result_json TEXT DEFAULT '{}', score REAL, total_score REAL, status TEXT DEFAULT 'created', created_at TEXT DEFAULT (datetime('now')), completed_at TEXT DEFAULT '');
   CREATE TABLE IF NOT EXISTS question_favorites (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, course_id INTEGER NOT NULL, quiz_id INTEGER NOT NULL, question_id TEXT NOT NULL, question_json TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')), UNIQUE(user_id,quiz_id,question_id));
   CREATE TABLE IF NOT EXISTS agent_threads (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, title TEXT DEFAULT '新的学习对话', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
-  CREATE TABLE IF NOT EXISTS agent_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
+  CREATE TABLE IF NOT EXISTS agent_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, agent_type TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS agent_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, thread_id INTEGER NOT NULL, file_name TEXT NOT NULL, file_path TEXT NOT NULL, mime_type TEXT DEFAULT '', file_size INTEGER DEFAULT 0, extracted_text TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS conversation_reads (conversation_id INTEGER NOT NULL, user_id INTEGER NOT NULL, last_read_message_id INTEGER DEFAULT 0, updated_at TEXT DEFAULT (datetime('now')), PRIMARY KEY(conversation_id,user_id));
   CREATE TABLE IF NOT EXISTS agent_memories (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, memory_key TEXT NOT NULL, content TEXT NOT NULL, updated_at TEXT DEFAULT (datetime('now')), UNIQUE(user_id, memory_key));
@@ -268,6 +271,7 @@ for (const column of [
   "ALTER TABLE users ADD COLUMN account_status TEXT DEFAULT 'active'",
   "ALTER TABLE users ADD COLUMN disabled_reason TEXT DEFAULT ''"
   ,"ALTER TABLE agent_messages ADD COLUMN attachments_json TEXT DEFAULT '[]'"
+  ,"ALTER TABLE agent_messages ADD COLUMN agent_type TEXT DEFAULT ''"
 ]) {
   try { db.exec(column) } catch { /* Existing databases already have this column. */ }
 }
@@ -625,15 +629,29 @@ async function gradeShortAnswers (user, items) {
   return {items:Array.isArray(parsed.items)?parsed.items:[],analysis:String(parsed.analysis||'请结合错题复盘。').slice(0,500),next_steps:Array.isArray(parsed.next_steps)?parsed.next_steps.map(item=>String(item).slice(0,160)).slice(0,4):[]}
 }
 
-function makeAgent(user) {
-  const userId=user.id
-  const search=tool(({query})=>{const rows=searchKnowledgeChunks(db,query);return rows.length?JSON.stringify(rows):'资源库没有找到可用正文片段；请明确告知学生，不要编造课程资料或引用。'},{name:'search_course_resources',description:'检索整个平台资料库中已解析的课程文件正文，并返回带课程、文件名、页码/幻灯片与文件链接的引用片段。回答课程知识问题前必须优先使用；检索词应尽量短且包含课程名、概念名或关键词。',schema:z.object({query:z.string().min(1).max(120)})})
-  const snapshot=tool(()=>JSON.stringify({schedule:db.prepare('SELECT course_name,weekday,start_time,end_time,location FROM schedules WHERE user_id=? ORDER BY weekday,start_time').all(userId),plans:db.prepare("SELECT title,content,status,due_date FROM study_plans WHERE user_id=? AND status!='done' ORDER BY id DESC LIMIT 5").all(userId),profile:db.prepare('SELECT content FROM agent_memories WHERE user_id=? AND memory_key=?').get(userId,'learning_profile')?.content||'尚未建立学习画像'}),{name:'get_my_learning_snapshot',description:'读取当前学生自己的课表、未完成计划和学习画像；制定安排前调用。',schema:z.object({})})
-  const draft=tool(({title,content,due_date})=>{const result=db.prepare('INSERT INTO study_plans (user_id,title,content,status,due_date) VALUES (?,?,?,?,?)').run(userId,title,content,'draft',due_date||null);return `已创建待确认计划草稿 #${result.lastInsertRowid}，请提醒学生到学习计划区确认后执行。`},{name:'create_plan_draft',description:'学生明确要求时创建可编辑学习计划草稿，绝不直接执行。',schema:z.object({title:z.string().min(2),content:z.string().min(10),due_date:z.string().optional()})})
-  const remember=tool(({summary})=>{db.prepare("INSERT INTO agent_memories (user_id,memory_key,content,updated_at) VALUES (?,?,?,?) ON CONFLICT(user_id,memory_key) DO UPDATE SET content=excluded.content,updated_at=excluded.updated_at").run(userId,'learning_profile',summary,now());return '已更新学习画像，只记录学习偏好、目标和薄弱点。'},{name:'save_learning_profile',description:'学生明确要求记住目标、偏好或薄弱点时使用。',schema:z.object({summary:z.string().min(5).max(600)})})
-  const modelName=SUPPORTED_DEEPSEEK_MODELS.has(user.model_type)?user.model_type:'deepseek-v4-flash'
-  const model=new ChatOpenAI({model:modelName,apiKey:decryptSecret(user.api_key),temperature:0.4,configuration:{baseURL:'https://api.deepseek.com'}})
-  return createAgent({model,tools:[search,snapshot,draft,remember],systemPrompt:`你是 CampusMind 的专属学习智能体，服务对象为 ${user.name}。你用中文以教练方式帮助理解、规划、复盘。规则：课程资料问答先调用 search_course_resources；只可依据工具返回的 excerpt 作答，答案末尾用“资料来源：”逐条列出 source 与 file_path，找不到就说明不确定，不能伪造引用；制定计划先调用 get_my_learning_snapshot，且只创建待确认草稿；只能读取当前学生数据；作业先给思路而非代写答案；回复结构清晰、简洁。`})
+/**
+ * 个人学习 Agent 的第一阶段运行时。
+ * 协调器先按意图挑选专业 Agent；每个 Agent 只获得完成该任务必要的工具。
+ */
+function createPersonalLearningRun (user, content) {
+  const userId = user.id
+  const search = createCourseResourceSearchTool({ db, searchKnowledgeChunks })
+  const { snapshot, remember } = createLearningStateTools({ db, userId, now })
+  const createPlanDraft = createPlanDraftTool({ db, userId, now })
+  const modelName = SUPPORTED_DEEPSEEK_MODELS.has(user.model_type) ? user.model_type : 'deepseek-v4-flash'
+  const model = new ChatOpenAI({
+    model: modelName,
+    apiKey: decryptSecret(user.api_key),
+    temperature: 0.4,
+    configuration: { baseURL: 'https://api.deepseek.com' }
+  })
+
+  return createLearningCoordinator({
+    content,
+    model,
+    user,
+    tools: { search, snapshot, remember, createPlanDraft }
+  })
 }
 function attachmentContext (attachment) { return attachment.extracted_text ? `\n\n[附件：${attachment.file_name}]\n${attachment.extracted_text.slice(0,12000)}` : `\n\n[已附加文件：${attachment.file_name}；当前模型无法直接读取其中正文。]` }
 function escapeSvg (value) { return String(value||'').replace(/[&<>"']/g,char=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;' }[char])) }
@@ -656,7 +674,7 @@ app.post('/api/agent/threads/:id/generate-artifact',auth,async(req,res)=>{
     const attachment=await saveAgentExport(threadId,user.id,mode,plan.title,artifactPlanMarkdown(plan,mode))
     const label={ppt:'PPT',word:'Word 学习报告',pdf:'PDF 学习报告'}[mode]
     const message=`已由成果生成 Agent 重新设计并生成 ${label}：${plan.title}（${plan.style}，${plan.totalPages} 页/段）。`
-    db.prepare("INSERT INTO agent_messages (thread_id,role,content,attachments_json) VALUES (?,?,?,?)").run(threadId,'assistant',message,JSON.stringify([attachment]))
+    db.prepare("INSERT INTO agent_messages (thread_id,role,content,agent_type,attachments_json) VALUES (?,?,?,?,?)").run(threadId,'assistant',message,'artifact',JSON.stringify([attachment]))
     db.prepare('UPDATE agent_threads SET updated_at=? WHERE id=?').run(now(),threadId)
     res.status(201).json({message,attachment,plan:{title:plan.title,total_pages:plan.totalPages,style:plan.style}})
   } catch(error) {
@@ -666,11 +684,53 @@ app.post('/api/agent/threads/:id/generate-artifact',auth,async(req,res)=>{
     res.status(status===401||status===429?status:502).json({error:message})
   }
 })
-app.post('/api/agent/threads/:id/generate-output',auth,async(req,res)=>{const threadId=Number(req.params.id),mode=req.body.mode==='file'?'markdown':req.body.mode;if(!['markdown','word','pdf','ppt','image'].includes(mode))return res.status(400).json({error:'输出类型不正确'});if(!db.prepare('SELECT 1 FROM agent_threads WHERE id=? AND user_id=?').get(threadId,req.user.id))return res.status(403).json({error:'无权使用该对话'});const source=db.prepare("SELECT content FROM agent_messages WHERE thread_id=? AND role='assistant' ORDER BY id DESC LIMIT 1").get(threadId);if(!source)return res.status(400).json({error:'请先获得 Agent 的回答，再生成文件或图片'});try{let attachment,message;if(mode==='image'){const safeName=`${crypto.randomUUID()}.svg`,fileName=`知识卡片-${Date.now()}.svg`,body=studyCardSvg('本次学习知识卡片',source.content);await fs.mkdir(agentUploadDir,{recursive:true});await fs.writeFile(path.join(agentUploadDir,safeName),body,'utf8');const result=db.prepare('INSERT INTO agent_attachments (user_id,thread_id,file_name,file_path,mime_type,file_size,created_at) VALUES (?,?,?,?,?,?,?)').run(req.user.id,threadId,fileName,safeName,'image/svg+xml',Buffer.byteLength(body),now());attachment=publicAgentAttachment(db.prepare('SELECT * FROM agent_attachments WHERE id=?').get(result.lastInsertRowid));message='已根据当前回答生成知识卡片图片。'}else{attachment=await saveAgentExport(threadId,req.user.id,mode,'本次学习资料',source.content);message={markdown:'已生成可下载学习笔记。',word:'已生成可下载 Word 学习报告。',pdf:'已生成可下载 PDF 学习报告。',ppt:'已生成可下载 PPT 学习汇报。'}[mode]}db.prepare("INSERT INTO agent_messages (thread_id,role,content,attachments_json) VALUES (?,?,?,?)").run(threadId,'assistant',message,JSON.stringify([attachment]));db.prepare('UPDATE agent_threads SET updated_at=? WHERE id=?').run(now(),threadId);res.status(201).json({message,attachment})}catch(error){console.error('Agent export error:',error);const message=error.code==='PDF_FONT_UNAVAILABLE'?'PDF 生成功能尚未配置中文字体。请联系管理员安装 fonts-droid-fallback，并在 server/.env 配置 PDF_FONT_PATH=/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf。':'生成输出文件失败，请稍后重试';res.status(500).json({error:message})}})
+app.post('/api/agent/threads/:id/generate-output',auth,async(req,res)=>{const threadId=Number(req.params.id),mode=req.body.mode==='file'?'markdown':req.body.mode;if(!['markdown','word','pdf','ppt','image'].includes(mode))return res.status(400).json({error:'输出类型不正确'});if(!db.prepare('SELECT 1 FROM agent_threads WHERE id=? AND user_id=?').get(threadId,req.user.id))return res.status(403).json({error:'无权使用该对话'});const source=db.prepare("SELECT content FROM agent_messages WHERE thread_id=? AND role='assistant' ORDER BY id DESC LIMIT 1").get(threadId);if(!source)return res.status(400).json({error:'请先获得 Agent 的回答，再生成文件或图片'});try{let attachment,message;if(mode==='image'){const safeName=`${crypto.randomUUID()}.svg`,fileName=`知识卡片-${Date.now()}.svg`,body=studyCardSvg('本次学习知识卡片',source.content);await fs.mkdir(agentUploadDir,{recursive:true});await fs.writeFile(path.join(agentUploadDir,safeName),body,'utf8');const result=db.prepare('INSERT INTO agent_attachments (user_id,thread_id,file_name,file_path,mime_type,file_size,created_at) VALUES (?,?,?,?,?,?,?)').run(req.user.id,threadId,fileName,safeName,'image/svg+xml',Buffer.byteLength(body),now());attachment=publicAgentAttachment(db.prepare('SELECT * FROM agent_attachments WHERE id=?').get(result.lastInsertRowid));message='已根据当前回答生成知识卡片图片。'}else{attachment=await saveAgentExport(threadId,req.user.id,mode,'本次学习资料',source.content);message={markdown:'已生成可下载学习笔记。',word:'已生成可下载 Word 学习报告。',pdf:'已生成可下载 PDF 学习报告。',ppt:'已生成可下载 PPT 学习汇报。'}[mode]}db.prepare("INSERT INTO agent_messages (thread_id,role,content,agent_type,attachments_json) VALUES (?,?,?,?,?)").run(threadId,'assistant',message,'artifact',JSON.stringify([attachment]));db.prepare('UPDATE agent_threads SET updated_at=? WHERE id=?').run(now(),threadId);res.status(201).json({message,attachment})}catch(error){console.error('Agent export error:',error);const message=error.code==='PDF_FONT_UNAVAILABLE'?'PDF 生成功能尚未配置中文字体。请联系管理员安装 fonts-droid-fallback，并在 server/.env 配置 PDF_FONT_PATH=/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf。':'生成输出文件失败，请稍后重试';res.status(500).json({error:message})}})
 app.get('/api/agent/threads',auth,(req,res)=>res.json(db.prepare('SELECT * FROM agent_threads WHERE user_id=? ORDER BY updated_at DESC').all(req.user.id)))
 app.post('/api/agent/threads',auth,(req,res)=>{const result=db.prepare('INSERT INTO agent_threads (user_id,title) VALUES (?,?)').run(req.user.id,(req.body.title||'新的学习对话').slice(0,50));res.status(201).json({id:result.lastInsertRowid})})
-app.get('/api/agent/threads/:id/messages',auth,(req,res)=>{if(!db.prepare('SELECT 1 FROM agent_threads WHERE id=? AND user_id=?').get(req.params.id,req.user.id))return res.status(404).json({error:'对话不存在'});res.json(db.prepare('SELECT role,content,created_at,attachments_json FROM agent_messages WHERE thread_id=? ORDER BY id').all(req.params.id).map(message=>({...message,attachments:JSON.parse(message.attachments_json||'[]')})))})
-app.post('/api/agent/chat',auth,async(req,res)=>{const content=(req.body.content||'').trim(),exportMode=requestedExportMode(content);let threadId=Number(req.body.thread_id||0),attachmentIds=[...new Set((Array.isArray(req.body.attachment_ids)?req.body.attachment_ids:[]).map(Number).filter(Boolean))];if((!content&&!attachmentIds.length)||content.length>4000)return res.status(400).json({error:'请输入学习问题或添加一个附件'});const user=userOf(req.user.id);if(!user?.api_key)return res.status(400).json({error:'NO_API_KEY',message:'请先在模型设置中绑定 DeepSeek API Key'});if(!threadId)threadId=Number(db.prepare('INSERT INTO agent_threads (user_id,title) VALUES (?,?)').run(user.id,(content||'附件学习问题').slice(0,24)).lastInsertRowid);if(!db.prepare('SELECT 1 FROM agent_threads WHERE id=? AND user_id=?').get(threadId,user.id))return res.status(403).json({error:'无权使用该对话'});const attachments=attachmentIds.length?db.prepare(`SELECT * FROM agent_attachments WHERE user_id=? AND thread_id=? AND id IN (${attachmentIds.map(()=>'?').join(',')})`).all(user.id,threadId,...attachmentIds):[];if(attachments.length!==attachmentIds.length)return res.status(400).json({error:'存在无权使用的附件'});const publicAttachments=attachments.map(publicAgentAttachment);db.prepare('INSERT INTO agent_messages (thread_id,role,content,attachments_json) VALUES (?,?,?,?)').run(threadId,'user',content||'请阅读我上传的附件。',JSON.stringify(publicAttachments));const history=db.prepare('SELECT role,content,attachments_json FROM agent_messages WHERE thread_id=? ORDER BY id DESC LIMIT 12').all(threadId).reverse().map(message=>{const ids=JSON.parse(message.attachments_json||'[]').map(item=>Number(item.id)).filter(Boolean);const rows=ids.length?db.prepare(`SELECT * FROM agent_attachments WHERE user_id=? AND id IN (${ids.map(()=>'?').join(',')})`).all(user.id,...ids):[];return {role:message.role,content:message.content+rows.map(attachmentContext).join('')}});try{const result=await makeAgent(user).invoke({messages:history}),last=result.messages.at(-1);let answer=typeof last?.content==='string'?last.content:JSON.stringify(last?.content||'暂时没有生成回复'),generated=[];if(exportMode)try{const attachment=await saveAgentExport(threadId,user.id,exportMode,'本次学习资料',answer);generated=[attachment];answer+=`\n\n已根据本次内容生成可下载的 ${exportMode==='ppt'?'PPT 学习汇报':exportMode==='word'?'Word 学习报告':exportMode==='pdf'?'PDF 学习报告':'学习笔记'}。`}catch(error){console.error('Automatic agent export error:',error);answer+=`\n\n${error.code==='PDF_FONT_UNAVAILABLE'?'PDF 生成功能尚未配置中文字体，请联系管理员完成字体配置。':'文件生成失败，请稍后在回复下方重新尝试。'}`}db.prepare('INSERT INTO agent_messages (thread_id,role,content,attachments_json) VALUES (?,?,?,?)').run(threadId,'assistant',answer,JSON.stringify(generated));db.prepare('UPDATE agent_threads SET updated_at=? WHERE id=?').run(now(),threadId);res.json({thread_id:threadId,answer,attachments:generated})}catch(error){console.error('Agent error:',error);res.status(502).json({error:'智能体调用失败，请检查 DeepSeek Key、额度或网络后重试'})}})
+app.get('/api/agent/threads/:id/messages',auth,(req,res)=>{
+  if(!db.prepare('SELECT 1 FROM agent_threads WHERE id=? AND user_id=?').get(req.params.id,req.user.id))return res.status(404).json({error:'对话不存在'})
+  res.json(db.prepare('SELECT role,content,agent_type,created_at,attachments_json FROM agent_messages WHERE thread_id=? ORDER BY id').all(req.params.id).map(message=>({...message,attachments:JSON.parse(message.attachments_json||'[]')})))
+})
+app.post('/api/agent/chat',auth,async(req,res)=>{
+  const content=(req.body.content||'').trim(),exportMode=requestedExportMode(content)
+  let threadId=Number(req.body.thread_id||0)
+  const attachmentIds=[...new Set((Array.isArray(req.body.attachment_ids)?req.body.attachment_ids:[]).map(Number).filter(Boolean))]
+  if((!content&&!attachmentIds.length)||content.length>4000)return res.status(400).json({error:'请输入学习问题或添加一个附件'})
+  const user=userOf(req.user.id)
+  if(!user?.api_key)return res.status(400).json({error:'NO_API_KEY',message:'请先在模型设置中绑定 DeepSeek API Key'})
+  if(!threadId)threadId=Number(db.prepare('INSERT INTO agent_threads (user_id,title) VALUES (?,?)').run(user.id,(content||'附件学习问题').slice(0,24)).lastInsertRowid)
+  if(!db.prepare('SELECT 1 FROM agent_threads WHERE id=? AND user_id=?').get(threadId,user.id))return res.status(403).json({error:'无权使用该对话'})
+
+  const attachments=attachmentIds.length
+    ?db.prepare(`SELECT * FROM agent_attachments WHERE user_id=? AND thread_id=? AND id IN (${attachmentIds.map(()=>'?').join(',')})`).all(user.id,threadId,...attachmentIds)
+    :[]
+  if(attachments.length!==attachmentIds.length)return res.status(400).json({error:'存在无权使用的附件'})
+  const publicAttachments=attachments.map(publicAgentAttachment)
+  db.prepare('INSERT INTO agent_messages (thread_id,role,content,attachments_json) VALUES (?,?,?,?)').run(threadId,'user',content||'请阅读我上传的附件。',JSON.stringify(publicAttachments))
+
+  const history=buildThreadHistory({db,threadId,userId:user.id,attachmentContext})
+  const orchestration=createPersonalLearningRun(user,content)
+  try {
+    const result=await orchestration.agent.invoke({messages:history})
+    const last=result.messages.at(-1)
+    let answer=typeof last?.content==='string'?last.content:JSON.stringify(last?.content||'暂时没有生成回复')
+    let generated=[]
+    if(exportMode)try{
+      const attachment=await saveAgentExport(threadId,user.id,exportMode,'本次学习资料',answer)
+      generated=[attachment]
+      answer+=`\n\n已根据本次内容生成可下载的 ${exportMode==='ppt'?'PPT 学习汇报':exportMode==='word'?'Word 学习报告':exportMode==='pdf'?'PDF 学习报告':'学习笔记'}。`
+    }catch(error){
+      console.error('Automatic agent export error:',error)
+      answer+=`\n\n${error.code==='PDF_FONT_UNAVAILABLE'?'PDF 生成功能尚未配置中文字体，请联系管理员完成字体配置。':'文件生成失败，请稍后在回复下方重新尝试。'}`
+    }
+    db.prepare('INSERT INTO agent_messages (thread_id,role,content,agent_type,attachments_json) VALUES (?,?,?,?,?)').run(threadId,'assistant',answer,orchestration.type,JSON.stringify(generated))
+    db.prepare('UPDATE agent_threads SET updated_at=? WHERE id=?').run(now(),threadId)
+    res.json({thread_id:threadId,answer,attachments:generated,orchestration:{type:orchestration.type,label:orchestration.label}})
+  }catch(error){
+    console.error('Agent error:',error)
+    res.status(502).json({error:'智能体调用失败，请检查 DeepSeek Key、额度或网络后重试'})
+  }
+})
 app.post('/api/quizzes/generate',auth,async(req,res)=>{const user=userOf(req.user.id),courseId=Number(req.body.course_id||0),course=db.prepare('SELECT * FROM courses WHERE id=?').get(courseId),detailTopic=String(req.body.topic||'').trim().slice(0,120),note=String(req.body.note||'').trim().slice(0,500),threadId=Number(req.body.thread_id||0)||null,typeCounts=quizTypeCounts(req.body.question_counts),questionCount=Object.values(typeCounts).reduce((sum,count)=>sum+count,0);if(!user?.api_key)return res.status(400).json({error:'NO_API_KEY',message:'请先在模型设置中绑定 DeepSeek API Key'});if(!course)return res.status(400).json({error:'请选择一门有效课程'});if(questionCount<1||questionCount>20)return res.status(400).json({error:'题目总数需在 1 到 20 之间'});const topic=detailTopic?`${course.name} · ${detailTopic}`:course.name,sources=searchKnowledgeChunks(db,detailTopic||course.name,10);if(!sources.length)return res.status(404).json({error:'该课程资料库中没有找到可检索正文，请先上传文字版课程资料或补充知识点'});try{const material=sources.map((source,index)=>`[资料 ${index+1}] ${source.source}\n${source.excerpt}`).join('\n\n'),typeInstruction=Object.entries(typeCounts).filter(([,count])=>count>0).map(([type,count])=>`${type}：${count} 题`).join('；');const prompt=`基于下列“${course.name}”课程资料，为大学生生成“${topic}”练习题，共 ${questionCount} 道。题型配额必须严格为：${typeInstruction}。用户额外要求：${note||'无'}。题目必须可由资料回答，不得编造资料外结论。每题 10 分。严格只输出 JSON：{"title":"测验标题","questions":[{"type":"single","stem":"题干","options":["选项内容一","选项内容二","选项内容三","选项内容四"],"answer":["A"],"explanation":"答案解析","source":"资料名称"}]}。重要：single 和 multiple 的 options 只填写“选项正文”，绝不能包含 A.、B.、C.、D.、A)、选项A 等选项字母或序号；同一道题的全部选项必须文本与含义均不重复。type 只能为 single、multiple、true_false、fill_blank、short；single/true_false 的 answer 只能有一个 A/B/C/D；multiple 可有多个；fill_blank 的 stem 必须包含“____”，answer 为可接受答案；short 的 answer 写评分关键点数组；fill_blank 和 short 的 options 为空。不要输出 Markdown。\n\n课程资料：\n${material}`;const raw=jsonFromModel(await quizModel(user,0.35).invoke([{role:'system',content:'你是 CampusMind 出题 Agent。只能依据给定资料出题，严格遵守题型配额。选择题选项不得自带 A/B/C/D 标签，且不得有重复选项。只返回合法 JSON。'},{role:'user',content:prompt}]));const quiz=normalizeQuiz(raw,topic,sources,typeCounts,note);const result=db.prepare("INSERT INTO quizzes (user_id,thread_id,course_id,topic,title,quiz_json,total_score,status) VALUES (?,?,?,?,?,?,?, 'created')").run(user.id,threadId,course.id,topic,quiz.title,JSON.stringify(quiz),quiz.questions.reduce((sum,question)=>sum+question.score,0));const row={...db.prepare('SELECT * FROM quizzes WHERE id=?').get(result.lastInsertRowid),course_name:course.name};res.status(201).json({quiz:publicQuiz(row)})}catch(error){console.error('Quiz generation error:',error);res.status(502).json({error:error.message?.startsWith('模型未按要求')?error.message:'出题失败，请检查 DeepSeek Key、额度或稍后重试'})}})
 app.post('/api/quizzes/:id/submit',auth,async(req,res)=>{const row=db.prepare('SELECT * FROM quizzes WHERE id=? AND user_id=?').get(req.params.id,req.user.id),user=userOf(req.user.id);if(!row)return res.status(404).json({error:'测验不存在'});if(row.status==='graded')return res.status(409).json({error:'该测验已经提交并批改过了'});const quiz=JSON.parse(row.quiz_json),answers=req.body.answers&&typeof req.body.answers==='object'?req.body.answers:{},results=[],shortItems=[];for(const question of quiz.questions){const response=question.type==='short'?String(answers[question.id]||'').trim():answerKeys(answers[question.id],question.options);if(question.type==='short'){shortItems.push({id:question.id,stem:question.stem,reference_points:question.answer,student_answer:response,max_score:question.score,source:question.source});results.push({id:question.id,student_answer:response,score:0,max_score:question.score,correct:false,feedback:'正在由 Agent 批改简答题…',source:question.source,correct_answer:question.answer,explanation:question.explanation});continue}const correct=JSON.stringify(response)===JSON.stringify([...question.answer].sort()),score=correct?question.score:0;results.push({id:question.id,student_answer:response,score,max_score:question.score,correct,feedback:correct?'回答正确。':'答案不正确，请查看解析后复盘。',source:question.source,correct_answer:question.answer,explanation:question.explanation})}try{const shortGrade=await gradeShortAnswers(user,shortItems),graded=new Map(shortGrade.items.map(item=>[String(item.id),item]));for(const item of results.filter(result=>shortItems.some(short=>short.id===result.id))){const score=Math.max(0,Math.min(item.max_score,Number(graded.get(item.id)?.score)||0));item.score=score;item.correct=score>=item.max_score*0.8;item.feedback=String(graded.get(item.id)?.feedback||'未获得有效批改反馈，请结合参考要点复盘。').slice(0,800)}const score=results.reduce((sum,item)=>sum+item.score,0),total=quiz.questions.reduce((sum,item)=>sum+item.score,0),objective=results.filter(item=>!shortItems.some(short=>short.id===item.id)),wrong=objective.filter(item=>!item.correct).length;const result={question_results:results,analysis:shortGrade.analysis||`本次客观题错了 ${wrong} 题，请优先复盘错题对应的资料来源。`,next_steps:shortGrade.next_steps?.length?shortGrade.next_steps:['逐题阅读解析，定位概念混淆处。','围绕错题来源再做一轮针对性练习。']};db.prepare("UPDATE quizzes SET answers_json=?,result_json=?,score=?,total_score=?,status='graded',completed_at=? WHERE id=?").run(JSON.stringify(answers),JSON.stringify(result),score,total,now(),row.id);const completed=db.prepare('SELECT * FROM quizzes WHERE id=?').get(row.id);res.json({quiz:publicQuiz(completed,true)})}catch(error){console.error('Quiz grade error:',error);res.status(502).json({error:'AI 批改失败，请稍后再次提交'})}})
 app.get('/api/quizzes',auth,(req,res)=>{const rows=db.prepare('SELECT q.*,c.name course_name FROM quizzes q LEFT JOIN courses c ON c.id=q.course_id WHERE q.user_id=? ORDER BY q.id DESC LIMIT 30').all(req.user.id);res.json(rows.map(row=>publicQuiz(row,row.status==='graded')))})
