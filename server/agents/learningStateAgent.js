@@ -9,7 +9,9 @@ export function createLearningStateTools ({ db, userId, now }) {
   const snapshot = tool(() => JSON.stringify({
     schedule: db.prepare('SELECT course_name,weekday,start_time,end_time,location FROM schedules WHERE user_id=? ORDER BY weekday,start_time').all(userId),
     plans: db.prepare("SELECT title,content,status,due_date FROM study_plans WHERE user_id=? AND status!='done' ORDER BY id DESC LIMIT 5").all(userId),
-    profile: db.prepare('SELECT content FROM agent_memories WHERE user_id=? AND memory_key=?').get(userId, 'learning_profile')?.content || '尚未建立学习画像'
+    profile: db.prepare('SELECT content FROM agent_memories WHERE user_id=? AND memory_key=?').get(userId, 'learning_profile')?.content || '尚未建立学习画像',
+    mastery: db.prepare(`SELECT kp.name,kp.course_id,um.mastery,um.attempts FROM user_knowledge_mastery um
+      JOIN knowledge_points kp ON kp.id=um.knowledge_point_id WHERE um.user_id=? ORDER BY um.mastery ASC LIMIT 8`).all(userId)
   }), {
     name: 'get_my_learning_snapshot',
     description: '读取当前学生自己的课表、未完成计划和学习画像；制定安排或进行学习复盘前调用。',

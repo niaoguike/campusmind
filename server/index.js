@@ -21,6 +21,11 @@ import { createLearningStateTools } from './agents/learningStateAgent.js'
 import { createPlanDraftTool } from './agents/plannerAgent.js'
 import { createLearningCoordinator } from './agents/coordinator.js'
 import { buildThreadHistory } from './agents/contextBuilder.js'
+import { buildLearningReviewInput, getLearningState, recordLearningEvent, updateMasteryFromQuiz } from './agents/learningAnalytics.js'
+import { buildQuizGenerationPrompt } from './agents/questionGeneratorAgent.js'
+import { buildShortAnswerGradingPrompt } from './agents/assessmentAgent.js'
+import { createReflectionAgent } from './agents/reflectionAgent.js'
+import { createGroupFacilitatorAgent, normalizeGroupProposal } from './agents/groupCollaborationAgent.js'
 import SmsClient, { SendSmsRequest } from '@alicloud/dysmsapi20170525'
 import OpenApi from '@alicloud/openapi-core'
 
@@ -218,6 +223,10 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS resource_folders (id INTEGER PRIMARY KEY AUTOINCREMENT, course_id INTEGER NOT NULL, name TEXT NOT NULL, description TEXT DEFAULT '', tags TEXT DEFAULT '', uploader_id INTEGER NOT NULL, created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS schedules (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, course_name TEXT NOT NULL, weekday INTEGER NOT NULL, start_time TEXT NOT NULL, end_time TEXT NOT NULL, location TEXT DEFAULT '', color TEXT DEFAULT '#d97745');
   CREATE TABLE IF NOT EXISTS study_plans (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, status TEXT DEFAULT 'draft', due_date TEXT, created_at TEXT DEFAULT (datetime('now')));
+  CREATE TABLE IF NOT EXISTS knowledge_points (id INTEGER PRIMARY KEY AUTOINCREMENT, course_id INTEGER NOT NULL, name TEXT NOT NULL, description TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), UNIQUE(course_id,name));
+  CREATE TABLE IF NOT EXISTS user_knowledge_mastery (user_id INTEGER NOT NULL, knowledge_point_id INTEGER NOT NULL, mastery REAL DEFAULT 0.5, attempts INTEGER DEFAULT 0, correct_count REAL DEFAULT 0, last_assessed_at TEXT DEFAULT '', updated_at TEXT DEFAULT (datetime('now')), PRIMARY KEY(user_id,knowledge_point_id));
+  CREATE TABLE IF NOT EXISTS learning_events (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, event_type TEXT NOT NULL, source_type TEXT DEFAULT '', source_id INTEGER, payload_json TEXT DEFAULT '{}', created_at TEXT DEFAULT (datetime('now')));
+  CREATE TABLE IF NOT EXISTS learning_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, summary TEXT NOT NULL, period_label TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS quizzes (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, thread_id INTEGER, course_id INTEGER, topic TEXT NOT NULL, title TEXT NOT NULL, quiz_json TEXT NOT NULL, answers_json TEXT DEFAULT '{}', result_json TEXT DEFAULT '{}', score REAL, total_score REAL, status TEXT DEFAULT 'created', created_at TEXT DEFAULT (datetime('now')), completed_at TEXT DEFAULT '');
   CREATE TABLE IF NOT EXISTS question_favorites (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, course_id INTEGER NOT NULL, quiz_id INTEGER NOT NULL, question_id TEXT NOT NULL, question_json TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')), UNIQUE(user_id,quiz_id,question_id));
   CREATE TABLE IF NOT EXISTS agent_threads (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, title TEXT DEFAULT '新的学习对话', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
@@ -229,6 +238,9 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS friendships (user_id INTEGER NOT NULL, friend_id INTEGER NOT NULL, created_at TEXT DEFAULT (datetime('now')), PRIMARY KEY(user_id, friend_id));
   CREATE TABLE IF NOT EXISTS conversations (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, type TEXT DEFAULT 'group', owner_id INTEGER, created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS conversation_members (conversation_id INTEGER, user_id INTEGER, PRIMARY KEY(conversation_id, user_id));
+  CREATE TABLE IF NOT EXISTS group_learning_consents (conversation_id INTEGER NOT NULL, user_id INTEGER NOT NULL, share_mastery INTEGER DEFAULT 0, share_plan_summary INTEGER DEFAULT 0, updated_at TEXT DEFAULT (datetime('now')), PRIMARY KEY(conversation_id,user_id));
+  CREATE TABLE IF NOT EXISTS group_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER NOT NULL, title TEXT NOT NULL, description TEXT DEFAULT '', assignee_id INTEGER, status TEXT DEFAULT 'todo', due_date TEXT DEFAULT '', created_by INTEGER NOT NULL, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
+  CREATE TABLE IF NOT EXISTS group_summaries (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER NOT NULL, content TEXT NOT NULL, agenda_json TEXT DEFAULT '[]', proposals_json TEXT DEFAULT '[]', created_by INTEGER NOT NULL, created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER NOT NULL, sender_id INTEGER NOT NULL, sender_type TEXT DEFAULT 'user', agent_owner_id INTEGER, content TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS agent_group_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER NOT NULL, agent_owner_id INTEGER NOT NULL, requested_by_id INTEGER NOT NULL, status TEXT DEFAULT 'pending', created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS group_agents (conversation_id INTEGER NOT NULL, user_id INTEGER NOT NULL, auto_reply INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')), PRIMARY KEY(conversation_id, user_id));
@@ -326,6 +338,35 @@ const member=(id,userId)=>!!db.prepare('SELECT 1 FROM conversation_members WHERE
 const conversationOf=id=>db.prepare('SELECT * FROM conversations WHERE id=?').get(id)
 const ownerOf=(id,userId)=>!!db.prepare('SELECT 1 FROM conversations WHERE id=? AND owner_id=?').get(id,userId)
 const friends=(left,right)=>!!db.prepare('SELECT 1 FROM friendships WHERE user_id=? AND friend_id=?').get(left,right)
+
+/** Only explicit group consent is transformed into the workspace seen by the group Agent. */
+function groupWorkspaceOf (conversationId) {
+  const members=db.prepare('SELECT u.id,u.name FROM conversation_members cm JOIN users u ON u.id=cm.user_id WHERE cm.conversation_id=? ORDER BY u.name').all(conversationId)
+  const consents=new Map(db.prepare('SELECT * FROM group_learning_consents WHERE conversation_id=?').all(conversationId).map(item=>[item.user_id,item]))
+  const sharedLearning=[]
+  for(const user of members){
+    const consent=consents.get(user.id)
+    if(!consent?.share_mastery&&!consent?.share_plan_summary)continue
+    const item={user_id:user.id,name:user.name}
+    if(consent.share_mastery){
+      item.weak_points=db.prepare(`SELECT kp.name,c.name AS course_name,um.mastery FROM user_knowledge_mastery um
+        JOIN knowledge_points kp ON kp.id=um.knowledge_point_id LEFT JOIN courses c ON c.id=kp.course_id
+        WHERE um.user_id=? ORDER BY um.mastery ASC LIMIT 3`).all(user.id)
+    }
+    if(consent.share_plan_summary){
+      item.plan_summary=db.prepare("SELECT COUNT(*) count FROM study_plans WHERE user_id=? AND status!='done'").get(user.id).count
+    }
+    sharedLearning.push(item)
+  }
+  const tasks=db.prepare(`SELECT t.*,u.name AS assignee_name,creator.name AS creator_name FROM group_tasks t
+    LEFT JOIN users u ON u.id=t.assignee_id JOIN users creator ON creator.id=t.created_by
+    WHERE t.conversation_id=? ORDER BY CASE t.status WHEN 'done' THEN 1 ELSE 0 END,t.id DESC`).all(conversationId)
+  const messages=db.prepare(`SELECT m.content,m.sender_type,m.created_at,CASE WHEN m.sender_type='agent' THEN u.agent_name ELSE u.name END sender_name
+    FROM messages m JOIN users u ON u.id=CASE WHEN m.sender_type='agent' THEN m.agent_owner_id ELSE m.sender_id END
+    WHERE m.conversation_id=? ORDER BY m.id DESC LIMIT 25`).all(conversationId).reverse()
+  const latestSummary=db.prepare('SELECT * FROM group_summaries WHERE conversation_id=? ORDER BY id DESC LIMIT 1').get(conversationId)
+  return { members, shared_learning:sharedLearning, tasks, recent_messages:messages, latest_summary:latestSummary?{...latestSummary,agenda:JSON.parse(latestSummary.agenda_json||'[]'),task_proposals:JSON.parse(latestSummary.proposals_json||'[]')}:null }
+}
 const isAdmin=userId=>userOf(userId)?.role==='admin'
 function bootstrapAdmin () { const studentId=(process.env.ADMIN_STUDENT_ID||'').trim(),password=process.env.ADMIN_PASSWORD||''; if(!studentId)return; const existing=db.prepare('SELECT id FROM users WHERE student_id=?').get(studentId); if(existing){db.prepare("UPDATE users SET role='admin' WHERE id=?").run(existing.id);return} if(!password)return; db.prepare("INSERT INTO users (student_id,name,phone,college,class,password,role) VALUES (?,?,?,?,?,?, 'admin')").run(studentId,(process.env.ADMIN_NAME||'CampusMind 管理员').slice(0,40),'管理员',(process.env.ADMIN_COLLEGE||'CampusMind 平台').slice(0,60),'系统管理员',hashPassword(password)) }
 bootstrapAdmin()
@@ -355,6 +396,9 @@ if (!db.prepare("SELECT 1 FROM announcements WHERE title='Agent 专业成果生�
 }
 if (!db.prepare("SELECT 1 FROM announcements WHERE title='论坛时间与手机号验证已更新' LIMIT 1").get()) {
   db.prepare('INSERT INTO announcements (title,content,is_pinned,author_id,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('论坛时间与手机号验证已更新','论坛帖子与评论现会显示中国标准时间。登录页新增手机号验证码登录和忘记密码入口；管理员配置阿里云短信服务后即可启用真实验证码发送。',0,null,now(),now())
+}
+if (!db.prepare("SELECT 1 FROM announcements WHERE title='多 Agent 学习闭环与群协作已上线' LIMIT 1").get()) {
+  db.prepare('INSERT INTO announcements (title,content,is_pinned,author_id,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('多 Agent 学习闭环与群协作已上线','专属学习 Agent 现会按请求调度资料检索、学习导师、学习计划与学习画像角色；AI 答题新增知识点掌握度更新与复盘依据；学习群新增任务协作、可撤回的学习摘要授权及小组协作 Agent 复习建议。',1,null,now(),now())
 }
 db.prepare("UPDATE resources SET file_path=REPLACE(file_path,'/uploads/resources/','/api/resources/files/') WHERE file_path LIKE '/uploads/resources/%'").run()
 for (const row of db.prepare("SELECT id,file_name FROM resources WHERE file_name!=''").all()) { const fixed=readableUploadName(row.file_name); if(fixed!==row.file_name) db.prepare('UPDATE resources SET file_name=? WHERE id=?').run(fixed,row.id) }
@@ -405,7 +449,7 @@ async function removeStudentAccount (target, actorId, detail='') {
     for(const resource of resources){db.prepare('DELETE FROM resource_chunks_fts WHERE resource_id=?').run(resource.id);db.prepare('DELETE FROM resource_chunks WHERE resource_id=?').run(resource.id);db.prepare('DELETE FROM resource_documents WHERE resource_id=?').run(resource.id)}
     for(const postId of postIds){db.prepare('DELETE FROM forum_votes WHERE post_id=?').run(postId);db.prepare('DELETE FROM forum_polls WHERE post_id=?').run(postId);db.prepare('DELETE FROM forum_comments WHERE post_id=?').run(postId)}
     db.prepare('DELETE FROM forum_votes WHERE user_id=?').run(target.id);db.prepare('DELETE FROM forum_comments WHERE author_id=?').run(target.id);db.prepare('DELETE FROM forum_posts WHERE author_id=?').run(target.id)
-    db.prepare('DELETE FROM question_favorites WHERE user_id=?').run(target.id);db.prepare('DELETE FROM quizzes WHERE user_id=?').run(target.id);db.prepare('DELETE FROM agent_messages WHERE thread_id IN (SELECT id FROM agent_threads WHERE user_id=?)').run(target.id);db.prepare('DELETE FROM agent_threads WHERE user_id=?').run(target.id);db.prepare('DELETE FROM agent_memories WHERE user_id=?').run(target.id);db.prepare('DELETE FROM study_plans WHERE user_id=?').run(target.id);db.prepare('DELETE FROM schedules WHERE user_id=?').run(target.id)
+    db.prepare('DELETE FROM question_favorites WHERE user_id=?').run(target.id);db.prepare('DELETE FROM quizzes WHERE user_id=?').run(target.id);db.prepare('DELETE FROM agent_messages WHERE thread_id IN (SELECT id FROM agent_threads WHERE user_id=?)').run(target.id);db.prepare('DELETE FROM agent_threads WHERE user_id=?').run(target.id);db.prepare('DELETE FROM agent_memories WHERE user_id=?').run(target.id);db.prepare('DELETE FROM user_knowledge_mastery WHERE user_id=?').run(target.id);db.prepare('DELETE FROM learning_events WHERE user_id=?').run(target.id);db.prepare('DELETE FROM learning_reviews WHERE user_id=?').run(target.id);db.prepare('DELETE FROM group_learning_consents WHERE user_id=?').run(target.id);db.prepare('DELETE FROM group_tasks WHERE created_by=? OR assignee_id=?').run(target.id,target.id);db.prepare('DELETE FROM group_summaries WHERE created_by=?').run(target.id);db.prepare('DELETE FROM study_plans WHERE user_id=?').run(target.id);db.prepare('DELETE FROM schedules WHERE user_id=?').run(target.id)
     db.prepare('DELETE FROM friend_agent_messages WHERE requester_id=? OR agent_owner_id=?').run(target.id,target.id);db.prepare('DELETE FROM friend_agent_access WHERE requester_id=? OR agent_owner_id=?').run(target.id,target.id);db.prepare('DELETE FROM agent_group_requests WHERE agent_owner_id=? OR requested_by_id=?').run(target.id,target.id);db.prepare('DELETE FROM group_agents WHERE user_id=?').run(target.id);db.prepare('DELETE FROM messages WHERE sender_id=? OR agent_owner_id=?').run(target.id,target.id);db.prepare('DELETE FROM conversation_reads WHERE user_id=?').run(target.id);db.prepare('DELETE FROM conversation_members WHERE user_id=?').run(target.id);db.prepare('UPDATE conversations SET owner_id=NULL WHERE owner_id=?').run(target.id)
     db.prepare('DELETE FROM friendships WHERE user_id=? OR friend_id=?').run(target.id,target.id);db.prepare('DELETE FROM friend_requests WHERE from_user_id=? OR to_user_id=?').run(target.id,target.id);db.prepare('DELETE FROM account_deletion_requests WHERE user_id=?').run(target.id);db.prepare('DELETE FROM resources WHERE uploader_id=?').run(target.id);db.prepare('DELETE FROM resource_folders WHERE uploader_id=?').run(target.id);db.prepare('DELETE FROM users WHERE id=?').run(target.id)
   });remove()
@@ -542,6 +586,66 @@ app.patch('/api/conversations/:id/my-agent',auth,(req,res)=>{const conversation=
 app.get('/api/conversations/:id/messages',auth,(req,res)=>{const conversation=conversationOf(req.params.id);if(!conversation||!member(conversation.id,req.user.id))return res.status(403).json({error:'无权查看此会话'});const messages=db.prepare("SELECT m.*,u.name owner_name,u.avatar owner_avatar,u.agent_name,u.agent_avatar,CASE WHEN m.sender_type='agent' THEN u.agent_name ELSE u.name END sender_name,CASE WHEN m.sender_type='agent' THEN u.agent_avatar ELSE u.avatar END sender_avatar,CASE WHEN m.sender_type='agent' THEN m.agent_owner_id ELSE m.sender_id END profile_user_id FROM messages m JOIN users u ON u.id=CASE WHEN m.sender_type='agent' THEN m.agent_owner_id ELSE m.sender_id END WHERE m.conversation_id=? ORDER BY m.id").all(conversation.id);const lastId=messages.at(-1)?.id||0;db.prepare("INSERT INTO conversation_reads (conversation_id,user_id,last_read_message_id,updated_at) VALUES (?,?,?,?) ON CONFLICT(conversation_id,user_id) DO UPDATE SET last_read_message_id=excluded.last_read_message_id,updated_at=excluded.updated_at").run(conversation.id,req.user.id,lastId,now());res.json(messages)})
 app.post('/api/conversations/:id/messages',auth,(req,res)=>{const conversation=conversationOf(req.params.id),content=String(req.body.content||'').trim().slice(0,2000);if(!conversation||!member(conversation.id,req.user.id))return res.status(403).json({error:'无权发送此会话'});if(!content)return res.status(400).json({error:'消息不能为空'});const result=db.prepare("INSERT INTO messages (conversation_id,sender_id,sender_type,content) VALUES (?,?,'user',?)").run(conversation.id,req.user.id,content);res.status(201).json({id:result.lastInsertRowid,created_at:now()});if(conversation.type==='group')setTimeout(()=>{const enabled=db.prepare('SELECT ga.user_id,u.agent_name FROM group_agents ga JOIN users u ON u.id=ga.user_id WHERE ga.conversation_id=? AND ga.auto_reply=1 AND u.api_key!=\'\'').all(conversation.id);for(const agent of enabled)if(!content.includes(`@${agent.agent_name}`))replyFromGroupAgent(conversation,agent.user_id,content,false).catch(error=>console.error('Group agent error:',error.message))},0)})
 app.post('/api/conversations/:id/agent-ask',auth,async(req,res)=>{const conversation=conversationOf(req.params.id),ownerId=Number(req.body.agent_owner_id),question=String(req.body.question||'').trim().slice(0,2000);if(!conversation||conversation.type!=='group'||!member(conversation.id,req.user.id))return res.status(403).json({error:'无权向该 Agent 提问'});if(!question)return res.status(400).json({error:'请输入问题'});if(!db.prepare('SELECT 1 FROM group_agents WHERE conversation_id=? AND user_id=?').get(conversation.id,ownerId))return res.status(404).json({error:'该 Agent 尚未获准进入本群'});try{const answer=await replyFromGroupAgent(conversation,ownerId,question,true);res.json({answer:answer||'该 Agent 暂时没有补充'})}catch(error){res.status(502).json({error:'Agent 调用失败，请检查该 Agent 主人的模型配置'})}})
+app.get('/api/conversations/:id/workspace',auth,(req,res)=>{
+  const conversation=conversationOf(req.params.id)
+  if(!conversation||conversation.type!=='group'||!member(conversation.id,req.user.id))return res.status(403).json({error:'无权查看该学习群协作空间'})
+  const workspace=groupWorkspaceOf(conversation.id)
+  const consent=db.prepare('SELECT share_mastery,share_plan_summary FROM group_learning_consents WHERE conversation_id=? AND user_id=?').get(conversation.id,req.user.id)||{share_mastery:0,share_plan_summary:0}
+  res.json({...workspace,my_consent:{share_mastery:!!consent.share_mastery,share_plan_summary:!!consent.share_plan_summary}})
+})
+app.patch('/api/conversations/:id/learning-consent',auth,(req,res)=>{
+  const conversation=conversationOf(req.params.id)
+  if(!conversation||conversation.type!=='group'||!member(conversation.id,req.user.id))return res.status(403).json({error:'无权设置该学习群的共享范围'})
+  const shareMastery=!!req.body.share_mastery,sharePlan=!!req.body.share_plan_summary
+  db.prepare(`INSERT INTO group_learning_consents (conversation_id,user_id,share_mastery,share_plan_summary,updated_at) VALUES (?,?,?,?,?)
+    ON CONFLICT(conversation_id,user_id) DO UPDATE SET share_mastery=excluded.share_mastery,share_plan_summary=excluded.share_plan_summary,updated_at=excluded.updated_at`)
+    .run(conversation.id,req.user.id,shareMastery?1:0,sharePlan?1:0,now())
+  recordLearningEvent({db,userId:req.user.id,eventType:'group_learning_consent_updated',sourceType:'conversation',sourceId:conversation.id,payload:{share_mastery:shareMastery,share_plan_summary:sharePlan},now})
+  res.json({message:'小组学习共享设置已更新',share_mastery:shareMastery,share_plan_summary:sharePlan})
+})
+app.post('/api/conversations/:id/tasks',auth,(req,res)=>{
+  const conversation=conversationOf(req.params.id),title=String(req.body.title||'').trim().slice(0,100),description=String(req.body.description||'').trim().slice(0,1000),assigneeId=Number(req.body.assignee_id||0)||null,dueDate=String(req.body.due_date||'').trim().slice(0,30)
+  if(!conversation||conversation.type!=='group'||!member(conversation.id,req.user.id))return res.status(403).json({error:'无权创建群任务'})
+  if(!title)return res.status(400).json({error:'请填写任务标题'})
+  if(assigneeId&&!member(conversation.id,assigneeId))return res.status(400).json({error:'任务负责人必须是群成员'})
+  const result=db.prepare('INSERT INTO group_tasks (conversation_id,title,description,assignee_id,status,due_date,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)').run(conversation.id,title,description,assigneeId,'todo',dueDate,req.user.id,now(),now())
+  res.status(201).json({id:result.lastInsertRowid,message:'已创建群任务'})
+})
+app.patch('/api/conversations/:id/tasks/:taskId',auth,(req,res)=>{
+  const conversation=conversationOf(req.params.id),task=db.prepare('SELECT * FROM group_tasks WHERE id=? AND conversation_id=?').get(req.params.taskId,req.params.id)
+  if(!conversation||conversation.type!=='group'||!task||!member(conversation.id,req.user.id))return res.status(404).json({error:'群任务不存在或无权修改'})
+  const canManage=task.created_by===req.user.id||task.assignee_id===req.user.id||ownerOf(conversation.id,req.user.id)
+  if(!canManage)return res.status(403).json({error:'只有任务创建者、负责人或群主可以修改任务'})
+  const status=req.body.status===undefined?task.status:String(req.body.status)
+  if(!['todo','doing','done'].includes(status))return res.status(400).json({error:'任务状态不正确'})
+  const title=req.body.title===undefined?task.title:String(req.body.title).trim().slice(0,100)
+  const description=req.body.description===undefined?task.description:String(req.body.description).trim().slice(0,1000)
+  db.prepare('UPDATE group_tasks SET title=?,description=?,status=?,due_date=?,updated_at=? WHERE id=?').run(title||task.title,description,status,String(req.body.due_date??task.due_date).slice(0,30),now(),task.id)
+  res.json({message:status==='done'?'群任务已完成':'群任务已更新'})
+})
+app.post('/api/conversations/:id/facilitate',auth,async(req,res)=>{
+  const conversation=conversationOf(req.params.id),user=userOf(req.user.id)
+  if(!conversation||conversation.type!=='group'||!member(conversation.id,req.user.id))return res.status(403).json({error:'无权使用群协作 Agent'})
+  if(!user?.api_key)return res.status(400).json({error:'NO_API_KEY',message:'请先在模型设置中绑定 DeepSeek API Key'})
+  const workspace=groupWorkspaceOf(conversation.id)
+  try {
+    const agent=createGroupFacilitatorAgent({model:quizModel(user,0.25),groupName:conversation.title,workspace})
+    const result=await agent.invoke({messages:[{role:'user',content:'请根据本群当前共享的学习进度、任务和讨论，生成一次复习总结、会议议程与待确认任务建议。'}]})
+    const proposal=normalizeGroupProposal(jsonFromModel(result.messages.at(-1)),workspace.members.map(item=>item.id))
+    const saved=db.prepare('INSERT INTO group_summaries (conversation_id,content,agenda_json,proposals_json,created_by,created_at) VALUES (?,?,?,?,?,?)').run(conversation.id,proposal.summary,JSON.stringify(proposal.agenda),JSON.stringify(proposal.task_proposals),req.user.id,now())
+    res.status(201).json({id:saved.lastInsertRowid,...proposal,message:'小组协作 Agent 已生成待确认的复习建议'})
+  } catch(error) {
+    console.error('Group facilitator agent error:',error)
+    res.status(502).json({error:'小组协作 Agent 调用失败，请检查 DeepSeek Key、额度或网络后重试'})
+  }
+})
+app.post('/api/conversations/:id/summaries/:summaryId/import-tasks',auth,(req,res)=>{
+  const conversation=conversationOf(req.params.id),summary=db.prepare('SELECT * FROM group_summaries WHERE id=? AND conversation_id=?').get(req.params.summaryId,req.params.id)
+  if(!conversation||conversation.type!=='group'||!summary||!member(conversation.id,req.user.id))return res.status(404).json({error:'协作建议不存在或无权导入'})
+  const proposals=JSON.parse(summary.proposals_json||'[]'),add=db.prepare('INSERT INTO group_tasks (conversation_id,title,description,assignee_id,status,due_date,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)')
+  const transaction=db.transaction(()=>{for(const item of proposals){if(!item?.title)continue;const assigneeId=Number(item.assignee_id||0)||null;if(assigneeId&&!member(conversation.id,assigneeId))continue;add.run(conversation.id,String(item.title).slice(0,100),String(item.description||'').slice(0,1000),assigneeId,'todo',String(item.due_date||'').slice(0,30),req.user.id,now(),now())}})
+  transaction();res.json({message:'已将建议导入群任务'})
+})
 app.get('/api/friend-agent/requests',auth,(req,res)=>res.json(db.prepare("SELECT r.*,u.name,u.avatar,u.agent_name,u.agent_avatar FROM friend_agent_access r JOIN users u ON u.id=r.requester_id WHERE r.agent_owner_id=? AND r.status='pending' ORDER BY r.id DESC").all(req.user.id)))
 app.get('/api/friend-agents/:ownerId/access',auth,(req,res)=>{const ownerId=Number(req.params.ownerId);if(!friends(req.user.id,ownerId))return res.status(403).json({error:'只能访问好友的 Agent'});res.json(db.prepare('SELECT status FROM friend_agent_access WHERE requester_id=? AND agent_owner_id=? ORDER BY id DESC LIMIT 1').get(req.user.id,ownerId)||{status:'none'})})
 app.post('/api/friend-agents/:ownerId/access',auth,(req,res)=>{const ownerId=Number(req.params.ownerId);if(!ownerId||!friends(req.user.id,ownerId))return res.status(403).json({error:'只能申请访问好友的 Agent'});if(!userOf(ownerId)?.api_key)return res.status(400).json({error:'好友尚未配置可用的模型'});const last=db.prepare('SELECT * FROM friend_agent_access WHERE requester_id=? AND agent_owner_id=? ORDER BY id DESC LIMIT 1').get(req.user.id,ownerId);if(last?.status==='approved')return res.json({status:'approved'});if(last?.status==='pending')return res.json({status:'pending'});db.prepare('INSERT INTO friend_agent_access (requester_id,agent_owner_id) VALUES (?,?)').run(req.user.id,ownerId);res.status(201).json({status:'pending',message:'已申请访问，等待好友同意'})})
@@ -598,7 +702,7 @@ function normalizeQuiz (raw, topic, sources, typeCounts, note='') {
     if(['short','fill_blank'].includes(type)&&!answer.length)answer=[String(item?.reference_answer||item?.explanation||'请结合资料中的关键概念作答').slice(0,800)]
     if(type==='single'||type==='true_false')answer.splice(1)
     if(!String(item?.stem||'').trim()||!answer.length)return null
-    return {id:`q${index+1}`,type,stem:String(item.stem).trim().slice(0,700),options,answer,explanation:String(item.explanation||'请结合资料中的对应知识点复盘。').trim().slice(0,1000),score:10,source:sources[index%sources.length]?.source||'平台资料库'}
+    return {id:`q${index+1}`,type,knowledge_point:String(item.knowledge_point||topic).trim().slice(0,100),stem:String(item.stem).trim().slice(0,700),options,answer,explanation:String(item.explanation||'请结合资料中的对应知识点复盘。').trim().slice(0,1000),score:10,source:sources[index%sources.length]?.source||'平台资料库'}
   }).filter(Boolean)
   const questions=[]
   for(const type of ['single','multiple','true_false','fill_blank','short']){
@@ -624,10 +728,122 @@ function publicQuiz (row, includeResult=false) {
 }
 async function gradeShortAnswers (user, items) {
   if(!items.length)return {items:[],analysis:'',next_steps:[]}
-  const prompt=`你是严谨的大学课程助教。请只根据每题的参考要点，对学生简答进行给分。不要要求逐字一致；概念错误不可给满分。严格输出 JSON：{"items":[{"id":"q1","score":0,"feedback":"具体反馈"}],"analysis":"整体薄弱点分析","next_steps":["建议1","建议2"]}。不得输出 Markdown。\n题目数据：${JSON.stringify(items)}`
+  const prompt=buildShortAnswerGradingPrompt(items)
   const parsed=jsonFromModel(await quizModel(user,0.15).invoke([{role:'system',content:'你只负责学习测验批改，输出合法 JSON。'},{role:'user',content:prompt}]))
   return {items:Array.isArray(parsed.items)?parsed.items:[],analysis:String(parsed.analysis||'请结合错题复盘。').slice(0,500),next_steps:Array.isArray(parsed.next_steps)?parsed.next_steps.map(item=>String(item).slice(0,160)).slice(0,4):[]}
 }
+
+app.get('/api/learning-state',auth,(req,res)=>{
+  const courseId=Number(req.query.course_id||0)||null
+  res.json(getLearningState({db,userId:req.user.id,courseId,limit:12}))
+})
+app.get('/api/learning-reviews',auth,(req,res)=>res.json(db.prepare('SELECT * FROM learning_reviews WHERE user_id=? ORDER BY id DESC LIMIT 12').all(req.user.id)))
+app.post('/api/learning-reviews',auth,async(req,res)=>{
+  const user=userOf(req.user.id)
+  if(!user?.api_key)return res.status(400).json({error:'NO_API_KEY',message:'请先在模型设置中绑定 DeepSeek API Key'})
+  const model=quizModel(user,0.25)
+  const {snapshot,remember}=createLearningStateTools({db,userId:user.id,now})
+  const reviewInput=buildLearningReviewInput({db,userId:user.id})
+  try {
+    const agent=createReflectionAgent({model,user,tools:[snapshot,remember]})
+    const result=await agent.invoke({messages:[{role:'user',content:`请生成一次学习复盘。系统已整理的辅助数据如下：${JSON.stringify(reviewInput)}`}]})
+    const summary=plainAnswer(result.messages.at(-1)).slice(0,5000)||'暂未生成有效复盘。'
+    const periodLabel=String(req.body?.period_label||'本周学习复盘').trim().slice(0,80)
+    const saved=db.prepare('INSERT INTO learning_reviews (user_id,summary,period_label,created_at) VALUES (?,?,?,?)').run(user.id,summary,periodLabel,now())
+    recordLearningEvent({db,userId:user.id,eventType:'learning_review_created',sourceType:'review',sourceId:saved.lastInsertRowid,payload:{period_label:periodLabel},now})
+    res.status(201).json({id:saved.lastInsertRowid,summary,period_label:periodLabel})
+  } catch(error) {
+    console.error('Learning review error:',error)
+    res.status(502).json({error:'学习复盘 Agent 调用失败，请检查 DeepSeek Key、额度或网络后重试'})
+  }
+})
+app.post('/api/plans/:id/complete',auth,(req,res)=>{
+  const plan=db.prepare('SELECT * FROM study_plans WHERE id=? AND user_id=?').get(req.params.id,req.user.id)
+  if(!plan)return res.status(404).json({error:'学习计划不存在'})
+  db.prepare("UPDATE study_plans SET status='done' WHERE id=? AND user_id=?").run(plan.id,req.user.id)
+  recordLearningEvent({db,userId:req.user.id,eventType:'plan_completed',sourceType:'plan',sourceId:plan.id,payload:{title:plan.title},now})
+  res.json({message:'已完成计划，学习画像已记录本次进度'})
+})
+
+app.post('/api/learning/quizzes/generate',auth,async(req,res)=>{
+  const user=userOf(req.user.id)
+  const courseId=Number(req.body.course_id||0)
+  const course=db.prepare('SELECT * FROM courses WHERE id=?').get(courseId)
+  const detailTopic=String(req.body.topic||'').trim().slice(0,120)
+  const note=String(req.body.note||'').trim().slice(0,500)
+  const threadId=Number(req.body.thread_id||0)||null
+  const typeCounts=quizTypeCounts(req.body.question_counts)
+  const questionCount=Object.values(typeCounts).reduce((sum,count)=>sum+count,0)
+  if(!user?.api_key)return res.status(400).json({error:'NO_API_KEY',message:'请先在模型设置中绑定 DeepSeek API Key'})
+  if(!course)return res.status(400).json({error:'请选择一门有效课程'})
+  if(questionCount<1||questionCount>20)return res.status(400).json({error:'题目总数需在 1 到 20 之间'})
+  const topic=detailTopic?`${course.name} · ${detailTopic}`:course.name
+  const sources=searchKnowledgeChunks(db,detailTopic||course.name,10)
+  if(!sources.length)return res.status(404).json({error:'该课程资料库中没有找到可检索正文，请先上传文字版课程资料或补充知识点'})
+  try {
+    const material=sources.map((source,index)=>`[资料 ${index+1}] ${source.source}\n${source.excerpt}`).join('\n\n')
+    const typeInstruction=Object.entries(typeCounts).filter(([,count])=>count>0).map(([type,count])=>`${type}：${count} 题`).join('；')
+    const prompt=buildQuizGenerationPrompt({courseName:course.name,topic,questionCount,typeInstruction,note,material})
+    const raw=jsonFromModel(await quizModel(user,0.35).invoke([
+      {role:'system',content:'你是 CampusMind 出题 Agent。只能依据给定资料出题，严格遵守题型配额、知识点标签和选项去重规则。只返回合法 JSON。'},
+      {role:'user',content:prompt}
+    ]))
+    const quiz=normalizeQuiz(raw,topic,sources,typeCounts,note)
+    const result=db.prepare("INSERT INTO quizzes (user_id,thread_id,course_id,topic,title,quiz_json,total_score,status) VALUES (?,?,?,?,?,?,?, 'created')")
+      .run(user.id,threadId,course.id,topic,quiz.title,JSON.stringify(quiz),quiz.questions.reduce((sum,question)=>sum+question.score,0))
+    recordLearningEvent({db,userId:user.id,eventType:'quiz_created',sourceType:'quiz',sourceId:result.lastInsertRowid,payload:{course_id:course.id,topic,question_count:quiz.questions.length},now})
+    const row={...db.prepare('SELECT * FROM quizzes WHERE id=?').get(result.lastInsertRowid),course_name:course.name}
+    res.status(201).json({quiz:publicQuiz(row),agent:'question_generator'})
+  } catch(error) {
+    console.error('Question generator agent error:',error)
+    res.status(502).json({error:error.message?.startsWith('模型未按要求')?error.message:'出题 Agent 调用失败，请检查 DeepSeek Key、额度或稍后重试'})
+  }
+})
+app.post('/api/learning/quizzes/:id/submit',auth,async(req,res)=>{
+  const row=db.prepare('SELECT * FROM quizzes WHERE id=? AND user_id=?').get(req.params.id,req.user.id)
+  const user=userOf(req.user.id)
+  if(!row)return res.status(404).json({error:'测验不存在'})
+  if(row.status==='graded')return res.status(409).json({error:'该测验已经提交并批改过了'})
+  const quiz=JSON.parse(row.quiz_json)
+  const answers=req.body.answers&&typeof req.body.answers==='object'?req.body.answers:{}
+  const results=[],shortItems=[]
+  for(const question of quiz.questions){
+    const response=question.type==='short'?String(answers[question.id]||'').trim():answerKeys(answers[question.id],question.options)
+    if(question.type==='short'){
+      shortItems.push({id:question.id,stem:question.stem,reference_points:question.answer,student_answer:response,max_score:question.score,source:question.source})
+      results.push({id:question.id,student_answer:response,score:0,max_score:question.score,correct:false,feedback:'正在由批改 Agent 评阅简答题…',source:question.source,knowledge_point:question.knowledge_point,correct_answer:question.answer,explanation:question.explanation})
+      continue
+    }
+    const correct=JSON.stringify(response)===JSON.stringify([...question.answer].sort())
+    results.push({id:question.id,student_answer:response,score:correct?question.score:0,max_score:question.score,correct,feedback:correct?'回答正确。':'答案不正确，请查看解析后复盘。',source:question.source,knowledge_point:question.knowledge_point,correct_answer:question.answer,explanation:question.explanation})
+  }
+  try {
+    const shortGrade=await gradeShortAnswers(user,shortItems)
+    const graded=new Map(shortGrade.items.map(item=>[String(item.id),item]))
+    for(const item of results.filter(result=>shortItems.some(short=>short.id===result.id))){
+      const score=Math.max(0,Math.min(item.max_score,Number(graded.get(item.id)?.score)||0))
+      item.score=score; item.correct=score>=item.max_score*0.8
+      item.feedback=String(graded.get(item.id)?.feedback||'未获得有效批改反馈，请结合参考要点复盘。').slice(0,800)
+    }
+    const score=results.reduce((sum,item)=>sum+item.score,0)
+    const total=quiz.questions.reduce((sum,item)=>sum+item.score,0)
+    const wrong=results.filter(item=>!item.correct).length
+    const masteryUpdates=updateMasteryFromQuiz({db,userId:user.id,courseId:row.course_id,questions:quiz.questions,results,now,quizId:row.id})
+    const result={
+      question_results:results,
+      analysis:shortGrade.analysis||`本次共 ${wrong} 题需要复盘，请优先查看对应知识点。`,
+      next_steps:shortGrade.next_steps?.length?shortGrade.next_steps:['逐题阅读解析，定位概念混淆处。','围绕错题来源再做一轮针对性练习。'],
+      mastery_updates:masteryUpdates
+    }
+    db.prepare("UPDATE quizzes SET answers_json=?,result_json=?,score=?,total_score=?,status='graded',completed_at=? WHERE id=?")
+      .run(JSON.stringify(answers),JSON.stringify(result),score,total,now(),row.id)
+    const completed=db.prepare('SELECT * FROM quizzes WHERE id=?').get(row.id)
+    res.json({quiz:publicQuiz(completed,true),learning_state:getLearningState({db,userId:user.id,courseId:row.course_id,limit:8}),agent:'assessment'})
+  } catch(error) {
+    console.error('Assessment agent error:',error)
+    res.status(502).json({error:'批改 Agent 调用失败，请稍后再次提交'})
+  }
+})
 
 /**
  * 个人学习 Agent 的第一阶段运行时。

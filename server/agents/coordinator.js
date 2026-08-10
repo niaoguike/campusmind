@@ -1,5 +1,6 @@
 import { createPlannerAgent } from './plannerAgent.js'
 import { createTutorAgent } from './tutorAgent.js'
+import { createReflectionAgent } from './reflectionAgent.js'
 
 const PLAN_PATTERN = /(计划|安排|日程|复习表|学习表|任务清单|时间表|每天.*学|本周.*学|下周.*学)/
 const RESOURCE_PATTERN = /(资料|课件|讲义|教材|ppt|pdf|文件夹|搜(?:索|一下)?|检索|在哪(?:里)?|有没有.*(?:课件|资料))/
@@ -40,7 +41,7 @@ export function createLearningCoordinator ({ content, model, user, tools }) {
     return {
       type: 'reflection',
       label: '学习画像 Agent',
-      agent: createTutorAgent({ model, user, tools: [tools.snapshot, tools.remember, tools.search] })
+      agent: createReflectionAgent({ model, user, tools: [tools.snapshot, tools.remember] })
     }
   }
 

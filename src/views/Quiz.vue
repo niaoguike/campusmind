@@ -24,7 +24,7 @@
       <section v-else-if="step === 'taking'" class="exam panel">
         <header class="exam-header"><div><span class="eyebrow">AI GENERATED QUIZ</span><h2>{{ quiz.title }}</h2><p>{{ quiz.topic }} · {{ quiz.questions.length }} 道题</p></div><button class="plain" :disabled="loading" @click="restart">重新设置</button></header>
         <article v-for="(question, index) in quiz.questions" :key="question.id" class="question-card">
-          <div class="question-title"><b>{{ index + 1 }}</b><span>{{ typeLabel(question.type) }}</span><p>{{ question.stem }}</p></div>
+          <div class="question-title"><b>{{ index + 1 }}</b><span>{{ typeLabel(question.type) }}</span><p>{{ question.stem }}</p><small>{{ question.knowledge_point || quiz.topic }}</small></div>
           <el-radio-group v-if="question.type === 'single' || question.type === 'true_false'" v-model="answers[question.id]" class="options"><el-radio v-for="(option, optionIndex) in question.options" :key="optionIndex" :value="letter(optionIndex)">{{ letter(optionIndex) }}. {{ displayOption(option) }}</el-radio></el-radio-group>
           <el-checkbox-group v-else-if="question.type === 'multiple'" v-model="answers[question.id]" class="options"><el-checkbox v-for="(option, optionIndex) in question.options" :key="optionIndex" :value="letter(optionIndex)">{{ letter(optionIndex) }}. {{ displayOption(option) }}</el-checkbox></el-checkbox-group>
           <el-input v-else-if="question.type === 'fill_blank'" v-model="answers[question.id]" maxlength="300" placeholder="请填写答案…" />
@@ -36,7 +36,8 @@
 
       <section v-else class="result panel">
         <div class="score-card"><span>本次得分</span><strong>{{ quiz.score }}<small> / {{ quiz.total_score }}</small></strong><p>{{ quiz.result?.analysis }}</p></div>
-        <div class="next-steps"><b>Agent 的复习建议</b><ul><li v-for="(item, index) in quiz.result?.next_steps || []" :key="index">{{ item }}</li></ul></div>
+        <div class="next-steps"><b>批改 Agent 的复习建议</b><ul><li v-for="(item, index) in quiz.result?.next_steps || []" :key="index">{{ item }}</li></ul></div>
+        <div v-if="quiz.result?.mastery_updates?.length" class="mastery-updates"><b>学习画像已更新</b><div v-for="item in quiz.result.mastery_updates" :key="item.knowledge_point_id"><span>{{ item.name }}</span><small>{{ Math.round(item.previous_mastery * 100) }}% → {{ Math.round(item.mastery * 100) }}%</small><i><em :style="{ width: `${Math.round(item.mastery * 100)}%` }"></em></i></div></div>
         <article v-for="(question, index) in quiz.result?.question_results || []" :key="question.id" class="feedback-card" :class="{ correct: question.correct }"><div><b>第 {{ index + 1 }} 题 · {{ question.score }}/{{ question.max_score }} 分</b><span>{{ question.correct ? '掌握不错' : '需要复盘' }}</span></div><p>{{ question.feedback }}</p><small>参考答案：{{ formatAnswer(question.correct_answer) }}<br>解析：{{ question.explanation }}<br>资料来源：{{ question.source }}</small><button class="favorite-button" :disabled="favoriteLoading[question.id]" @click="toggleFavorite(question)">{{ favoriteIds[question.id] ? '★ 已收藏' : '☆ 收藏此题' }}</button></article>
         <footer class="result-footer"><button class="primary" @click="restart">再来一套练习</button></footer>
       </section>
@@ -71,7 +72,7 @@ const formatAnswer = answer => Array.isArray(answer) ? answer.join('、') : Stri
 async function generateQuiz () {
   loading.value = true
   try {
-    const data = await post('/quizzes/generate', { course_id: courseId.value, topic: topic.value.trim(), question_counts: typeCounts.value, note: note.value.trim() })
+    const data = await post('/learning/quizzes/generate', { course_id: courseId.value, topic: topic.value.trim(), question_counts: typeCounts.value, note: note.value.trim() })
     quiz.value = data.quiz
     answers.value = Object.fromEntries(data.quiz.questions.map(question => [question.id, question.type === 'multiple' ? [] : '']))
     favoriteIds.value = {}
@@ -82,7 +83,7 @@ async function submitQuiz () {
   const unanswered = quiz.value.questions.some(question => question.type === 'multiple' ? !answers.value[question.id]?.length : !String(answers.value[question.id] || '').trim())
   if (unanswered && !confirm('还有题目未作答，仍要提交吗？')) return
   loading.value = true
-  try { const data = await post(`/quizzes/${quiz.value.id}/submit`, { answers: answers.value }); quiz.value = data.quiz; step.value = 'result' } catch (error) { ElMessage.error(error.message) } finally { loading.value = false }
+  try { const data = await post(`/learning/quizzes/${quiz.value.id}/submit`, { answers: answers.value }); quiz.value = data.quiz; step.value = 'result' } catch (error) { ElMessage.error(error.message) } finally { loading.value = false }
 }
 function restart () { step.value = 'config'; quiz.value = null; answers.value = {} }
 async function toggleFavorite (question) {

@@ -12,7 +12,7 @@
       </aside>
       <section class="panel chat">
         <header><div><span>PRIVATE LEARNING AGENT</span><h1>和你的学习伙伴一起进步</h1></div><div class="model-actions"><em>● 已连接 DeepSeek</em><button type="button" class="artifact-compact" @click="openArtifactStudio">✨ 专业生成成果</button></div></header>
-        <div class="shortcuts"><button @click="ask('帮我根据本周课表安排一个学习计划')">安排本周计划</button><button @click="ask('帮我找数据结构相关的复习资料')">检索课程资料</button><button @click="ask('请记住：我每天晚上 8 点后适合学习')">记录学习偏好</button></div>
+        <div class="shortcuts"><button @click="ask('帮我根据本周课表安排一个学习计划')">安排本周计划</button><button @click="ask('帮我找数据结构相关的复习资料')">检索课程资料</button><button @click="ask('请根据我的学习状态生成本周复盘')">生成本周复盘</button><button @click="ask('请记住：我每天晚上 8 点后适合学习')">记录学习偏好</button></div>
         <div v-if="showExportTip" class="export-tip"><span>得到回答后，直接点击回答下方的 <b>PPT / Word / PDF / 图片</b> 按钮即可下载；也可以直接说“生成 PPT”。</span><button type="button" aria-label="关闭提示" title="关闭本次提示" @click="showExportTip = false">×</button></div>
         <div ref="scrollBox" class="messages">
           <div v-if="!messages.length" class="empty"><strong>✦ 今天想从哪里开始？</strong><p>可以问概念、检索课程资料、梳理错题，或让知行生成学习计划。</p></div>
