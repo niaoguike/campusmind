@@ -249,8 +249,11 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS agent_events (id INTEGER PRIMARY KEY AUTOINCREMENT, actor_user_id INTEGER, target_user_id INTEGER, run_id INTEGER, event_type TEXT NOT NULL, scope_json TEXT DEFAULT '{}', payload_json TEXT DEFAULT '{}', status TEXT DEFAULT 'created', created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS agent_collaboration_policies (user_id INTEGER NOT NULL, course_id INTEGER NOT NULL DEFAULT 0, allow_matching INTEGER DEFAULT 0, auto_respond INTEGER DEFAULT 0, share_mastery INTEGER DEFAULT 0, share_resource_titles INTEGER DEFAULT 1, updated_at TEXT DEFAULT (datetime('now')), PRIMARY KEY(user_id,course_id));
   CREATE TABLE IF NOT EXISTS agent_delegations (id INTEGER PRIMARY KEY AUTOINCREMENT, requester_id INTEGER NOT NULL, agent_owner_id INTEGER NOT NULL, course_id INTEGER NOT NULL, question TEXT NOT NULL, requester_summary TEXT DEFAULT '', scope_json TEXT DEFAULT '{}', status TEXT DEFAULT 'pending', peer_answer TEXT DEFAULT '', synthesis TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), expires_at TEXT DEFAULT '');
-  CREATE TABLE IF NOT EXISTS agent_platform_permissions (user_id INTEGER PRIMARY KEY, allow_group_post INTEGER DEFAULT 0, allow_friend_broadcast INTEGER DEFAULT 0, allow_group_task INTEGER DEFAULT 0, allow_peer_delegation INTEGER DEFAULT 0, updated_at TEXT DEFAULT (datetime('now')));
+  CREATE TABLE IF NOT EXISTS agent_platform_permissions (user_id INTEGER PRIMARY KEY, allow_group_post INTEGER DEFAULT 0, allow_friend_broadcast INTEGER DEFAULT 0, allow_group_task INTEGER DEFAULT 0, allow_peer_delegation INTEGER DEFAULT 0, allow_resource_manage INTEGER DEFAULT 0, allow_forum_publish INTEGER DEFAULT 0, updated_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS agent_platform_action_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, thread_id INTEGER, action_type TEXT NOT NULL, payload_json TEXT NOT NULL, status TEXT DEFAULT 'pending', created_at TEXT DEFAULT (datetime('now')), executed_at TEXT DEFAULT '', expires_at TEXT DEFAULT '');
+  CREATE TABLE IF NOT EXISTS agent_projects (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, title TEXT NOT NULL, goal TEXT NOT NULL, summary TEXT DEFAULT '', status TEXT DEFAULT 'active', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT DEFAULT '');
+  CREATE TABLE IF NOT EXISTS agent_project_steps (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL, step_order INTEGER NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, description TEXT DEFAULT '', status TEXT DEFAULT 'pending', action_type TEXT DEFAULT '', action_payload_json TEXT DEFAULT '{}', result_json TEXT DEFAULT '{}', action_request_id INTEGER, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
+  CREATE TABLE IF NOT EXISTS agent_forum_drafts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, project_id INTEGER, title TEXT NOT NULL, content TEXT NOT NULL, category TEXT DEFAULT '学习交流', poll_question TEXT DEFAULT '', poll_options_json TEXT DEFAULT '[]', status TEXT DEFAULT 'draft', published_post_id INTEGER, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS group_agent_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER NOT NULL, initiator_id INTEGER NOT NULL, billing_user_id INTEGER NOT NULL, topic TEXT NOT NULL, status TEXT DEFAULT 'queued', turn_count INTEGER DEFAULT 0, max_turns INTEGER DEFAULT 12, stop_reason TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), stopped_at TEXT DEFAULT '');
   CREATE TABLE IF NOT EXISTS group_agent_session_participants (session_id INTEGER NOT NULL, owner_user_id INTEGER NOT NULL, turn_order INTEGER NOT NULL, PRIMARY KEY(session_id,owner_user_id));
   CREATE TABLE IF NOT EXISTS group_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER NOT NULL, message_id INTEGER, created_by_user_id INTEGER NOT NULL, file_name TEXT NOT NULL, file_path TEXT NOT NULL, mime_type TEXT DEFAULT '', file_size INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')));
@@ -312,6 +315,8 @@ for (const column of [
   ,"ALTER TABLE messages ADD COLUMN message_kind TEXT DEFAULT ''"
   ,"ALTER TABLE messages ADD COLUMN agent_session_id INTEGER"
   ,"ALTER TABLE messages ADD COLUMN attachments_json TEXT DEFAULT '[]'"
+  ,"ALTER TABLE agent_platform_permissions ADD COLUMN allow_resource_manage INTEGER DEFAULT 0"
+  ,"ALTER TABLE agent_platform_permissions ADD COLUMN allow_forum_publish INTEGER DEFAULT 0"
 ]) {
   try { db.exec(column) } catch { /* Existing databases already have this column. */ }
 }
@@ -624,6 +629,9 @@ if (!db.prepare("SELECT 1 FROM announcements WHERE title='持续 Agent 协作与
 }
 if (!db.prepare("SELECT 1 FROM announcements WHERE title='聊天 Agent 文档生成与委托已优化' LIMIT 1").get()) {
   db.prepare('INSERT INTO announcements (title,content,is_pinned,author_id,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('聊天 Agent 文档生成与委托已优化','群内 Agent、好友 Agent 与我的 Agent 现在都可直接理解“生成文档、报告、讲义、Word、PPT、PDF、学习笔记”等自然语言指令，并在对应聊天消息下提供受保护的下载附件。持续多 Agent 协作若主题中含生成文件需求，会在自动总结后附上成果文件。我的 Agent 的“找其他 Agent 咨询”现会检查协作权限、课程和可用候选：权限未开启时可一键进入设置，满足条件时会生成待确认的协作委托卡片。',1,null,now(),now())
+}
+if (!db.prepare("SELECT 1 FROM announcements WHERE title='总 Agent 项目中心与资料库管家已上线' LIMIT 1").get()) {
+  db.prepare('INSERT INTO announcements (title,content,is_pinned,author_id,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('总 Agent 项目中心与资料库管家已上线','“我的 Agent”现可把较大的学习目标建立为可追踪项目，并拆分为学习计划、资料库整理、论坛经验收集和同课程 Agent 协作四步。资料整理只会处理本人未归档文件；论坛内容会先保存为草稿；学习计划、移动资料、公开发帖和跨用户协作均须由本人逐项确认后才会执行。',1,null,now(),now())
 }
 db.prepare("UPDATE resources SET file_path=REPLACE(file_path,'/uploads/resources/','/api/resources/files/') WHERE file_path LIKE '/uploads/resources/%'").run()
 for (const row of db.prepare("SELECT id,file_name FROM resources WHERE file_name!=''").all()) { const fixed=readableUploadName(row.file_name); if(fixed!==row.file_name) db.prepare('UPDATE resources SET file_name=? WHERE id=?').run(fixed,row.id) }
@@ -1137,10 +1145,40 @@ function matchingCourseForPeerRequest (requesterId, content = '') {
 }
 function platformPermissionsOf (userId) {
   return db.prepare('SELECT * FROM agent_platform_permissions WHERE user_id=?').get(userId)
-    || {user_id:userId,allow_group_post:0,allow_friend_broadcast:0,allow_group_task:0,allow_peer_delegation:0,updated_at:''}
+    || {user_id:userId,allow_group_post:0,allow_friend_broadcast:0,allow_group_task:0,allow_peer_delegation:0,allow_resource_manage:0,allow_forum_publish:0,updated_at:''}
 }
 function publicPlatformPermissions (row) {
-  return {allow_group_post:!!row.allow_group_post,allow_friend_broadcast:!!row.allow_friend_broadcast,allow_group_task:!!row.allow_group_task,allow_peer_delegation:!!row.allow_peer_delegation,updated_at:row.updated_at||''}
+  return {allow_group_post:!!row.allow_group_post,allow_friend_broadcast:!!row.allow_friend_broadcast,allow_group_task:!!row.allow_group_task,allow_peer_delegation:!!row.allow_peer_delegation,allow_resource_manage:!!row.allow_resource_manage,allow_forum_publish:!!row.allow_forum_publish,updated_at:row.updated_at||''}
+}
+function courseMentionedIn (content = '') {
+  const text=String(content||'')
+  return db.prepare('SELECT * FROM courses ORDER BY LENGTH(name) DESC').all().find(course=>text.includes(course.name))||null
+}
+function rootProjectBlueprint (goal = '') {
+  const text=String(goal||'').trim(),course=courseMentionedIn(text)
+  const focus=course?.name||'当前学习目标'
+  return {
+    title:`${focus} · 学习项目`,
+    summary:'总 Agent 将把目标拆成计划、资料整理、论坛信息收集和协作四类可追踪步骤；涉及发布、移动资料或联系他人的操作会单独等待确认。',
+    steps:[
+      {kind:'plan',title:'形成可执行学习计划',description:`围绕“${text.slice(0,80)}”生成一份可编辑的个人学习计划。`,action_type:'project_plan'},
+      {kind:'resources',title:'盘点并整理我的课程资料',description:`检查你上传的 ${focus} 资料，为未归档文件准备文件夹和标签整理方案。`,action_type:'resource_organize'},
+      {kind:'forum',title:'收集论坛经验并起草交流帖',description:'搜索校园论坛的相关讨论；如信息不足，生成一篇可编辑的求助或经验交流草稿。',action_type:'forum_draft'},
+      {kind:'collaboration',title:'准备同课程 Agent 协作',description:'查找已明确开放协作授权的同课程 Agent，并准备受控咨询请求。',action_type:'peer_collaboration'}
+    ]
+  }
+}
+function publicProjectStep (step) {
+  const action=step.action_request_id?db.prepare('SELECT id,action_type,status,created_at,expires_at FROM agent_platform_action_requests WHERE id=?').get(step.action_request_id):null
+  const draft=step.action_type==='forum_draft'?db.prepare('SELECT id,title,content,category,poll_question,poll_options_json,status,published_post_id,updated_at FROM agent_forum_drafts WHERE project_id=? ORDER BY id DESC LIMIT 1').get(step.project_id):null
+  return {...step,action,result:safeJson(step.result_json,{}),draft:draft?{...draft,poll_options:safeJson(draft.poll_options_json,[])}:null}
+}
+function publicProject (project) {
+  const steps=db.prepare('SELECT * FROM agent_project_steps WHERE project_id=? ORDER BY step_order,id').all(project.id).map(publicProjectStep)
+  return {...project,steps,progress:{total:steps.length,done:steps.filter(step=>step.status==='done').length,pending_confirmation:steps.filter(step=>step.status==='awaiting_confirmation').length}}
+}
+function projectsOf (userId) {
+  return db.prepare('SELECT * FROM agent_projects WHERE user_id=? ORDER BY CASE status WHEN \'active\' THEN 0 WHEN \'draft\' THEN 1 ELSE 2 END,updated_at DESC,id DESC LIMIT 20').all(userId).map(publicProject)
 }
 function userGroups (userId) {
   return db.prepare("SELECT c.* FROM conversations c JOIN conversation_members cm ON cm.conversation_id=c.id WHERE cm.user_id=? AND c.type='group' ORDER BY c.id DESC").all(userId)
@@ -1196,6 +1234,48 @@ function createPlatformActionRequests (userId, threadId, actions) {
     return {...action,request_id:id,status:'pending'}
   })
 }
+function linkProjectAction (stepId, action) {
+  db.prepare("UPDATE agent_project_steps SET status='awaiting_confirmation',action_request_id=?,action_payload_json=?,updated_at=? WHERE id=?")
+    .run(action.request_id,JSON.stringify(action.payload||{}),now(),stepId)
+}
+function projectPlanProposal (project) {
+  const due=new Date(Date.now()+14*24*3600_000).toISOString().slice(0,10)
+  return {title:`${project.title} · 执行计划`,due_date:due,content:`# ${project.title}\n\n## 学习目标\n${project.goal}\n\n## 第一阶段：资料与基础梳理\n- 整理并阅读本项目相关课程资料\n- 标记不理解的概念与待解决问题\n\n## 第二阶段：重点练习\n- 围绕薄弱知识点完成练习与错题复盘\n- 每次学习后记录完成情况\n\n## 第三阶段：协作与输出\n- 结合群讨论或同课程 Agent 的已授权建议修订计划\n- 输出复习笔记、报告或演示材料\n\n> 该计划由总 Agent 根据你的目标生成，可在学习计划页继续修改。`}
+}
+function resourceOrganizationProposal (userId, goal = '') {
+  const rows=db.prepare(`SELECT r.id,r.title,r.tags,r.type,r.folder_id,r.course_id,c.name AS course_name
+    FROM resources r JOIN courses c ON c.id=r.course_id WHERE r.uploader_id=? ORDER BY r.course_id,r.id DESC LIMIT 120`).all(userId)
+  const unfiled=rows.filter(row=>!row.folder_id)
+  const groups=[]
+  for(const [courseId,items] of Object.entries(unfiled.reduce((all,row)=>{(all[row.course_id]||=[]).push(row);return all},{}))){
+    const first=items[0],existing=db.prepare('SELECT id,name FROM resource_folders WHERE uploader_id=? AND course_id=? ORDER BY id DESC LIMIT 1').get(userId,courseId)
+    groups.push({course_id:Number(courseId),course_name:first.course_name,folder_id:existing?.id||null,folder_name:existing?.name||`${first.course_name} · Agent 整理资料`,resource_ids:items.map(item=>item.id),tags:[first.course_name,'Agent整理']})
+  }
+  const duplicateTitles=rows.reduce((map,row)=>{const key=String(row.title||'').trim().toLowerCase();if(key)(map[key]||=[]).push(row.id);return map},{} )
+  const duplicates=Object.values(duplicateTitles).filter(ids=>ids.length>1).slice(0,8)
+  return {goal:String(goal||''),resource_count:rows.length,unfiled_count:unfiled.length,groups,duplicates}
+}
+function draftForumFallback (project, related=[]) {
+  const topic=project.goal.slice(0,45)
+  return {title:`想请教：${topic}`,content:`大家好，我正在推进“${project.goal}”。我已经整理了自己的课程资料和当前困惑，想请教大家：\n\n1. 你认为最值得优先投入的知识点或学习方法是什么？\n2. 复习或完成该任务时有哪些常见误区？\n3. 是否有适合分享的公开资料或经验？\n\n欢迎结合自己的学习过程交流，感谢大家！`,category:'学习交流',poll_question:related.length?'你认为最需要优先解决的是？':'你更推荐哪种学习方式？',poll_options:related.length?['先梳理知识框架','先完成针对性练习','先寻找同伴讨论']:['自己整理笔记','刷题与错题复盘','小组讨论']}
+}
+function parseModelObject (value, fallback) {
+  const text=String(value||'').replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'')
+  const start=text.indexOf('{'),end=text.lastIndexOf('}')
+  if(start<0||end<start)return fallback
+  try{return JSON.parse(text.slice(start,end+1))}catch{return fallback}
+}
+async function createProjectForumDraft (user, project) {
+  const related=db.prepare('SELECT title,content,category FROM forum_posts ORDER BY id DESC LIMIT 30').all().filter(post=>`${post.title} ${post.content}`.includes(project.goal.slice(0,10))).slice(0,5)
+  const fallback=draftForumFallback(project,related)
+  if(!user.api_key)return fallback
+  try {
+    const raw=await callExternalAgent(user,'你是校园学习论坛编辑助手。根据用户目标和已有公开帖子，返回一个严格 JSON 对象：title、content、category、poll_question、poll_options。内容应是友善的学习交流，不得编造事实、代写作业或包含敏感内容；标题不超过 60 字，正文不超过 1200 字，投票选项 2 到 4 项。',[{role:'user',content:`用户目标：${project.goal}\n\n相关公开帖子：${JSON.stringify(related)}`}],user)
+    const draft=parseModelObject(raw,fallback)
+    const normalized={title:String(draft.title||fallback.title).slice(0,60),content:String(draft.content||fallback.content).slice(0,1600),category:String(draft.category||'学习交流').slice(0,30),poll_question:String(draft.poll_question||'').slice(0,120),poll_options:Array.isArray(draft.poll_options)?draft.poll_options.map(item=>String(item||'').trim()).filter(Boolean).slice(0,4):[]}
+    return moderationError(normalized.title,normalized.content,normalized.poll_question,...normalized.poll_options)?fallback:normalized
+  } catch { return fallback }
+}
 async function executePlatformActionRequest (request) {
   const payload=safeJson(request.payload_json,{}),user=userOf(request.user_id)
   if(!user)throw new Error('用户不存在')
@@ -1221,6 +1301,47 @@ async function executePlatformActionRequest (request) {
     db.prepare("INSERT INTO group_tasks (conversation_id,title,description,assignee_id,status,due_date,created_by,created_at,updated_at) VALUES (?,?, '',NULL,'todo','',?,?,?)").run(conversation.id,String(payload.title||'').slice(0,100),user.id,now(),now())
     eventLog({actorUserId:user.id,eventType:'root_agent_group_task_created',scope:{conversation_id:conversation.id},payload:{title:String(payload.title||'').slice(0,100)},status:'done'})
     return `已在群“${conversation.title}”创建任务“${String(payload.title||'').slice(0,80)}”。`
+  }
+  if(request.action_type==='project_plan'){
+    const project=db.prepare('SELECT * FROM agent_projects WHERE id=? AND user_id=?').get(Number(payload.project_id),user.id)
+    if(!project)throw new Error('该总 Agent 项目不存在或已不属于你')
+    const saved=db.prepare("INSERT INTO study_plans (user_id,title,content,status,due_date) VALUES (?,?,?,?,?)").run(user.id,String(payload.title||project.title).slice(0,100),String(payload.content||'').slice(0,5000),'active',payload.due_date||null)
+    eventLog({actorUserId:user.id,eventType:'root_agent_project_plan_created',scope:{project_id:project.id},payload:{plan_id:Number(saved.lastInsertRowid)},status:'done'})
+    return `已将“${String(payload.title||project.title).slice(0,60)}”写入学习计划。`
+  }
+  if(request.action_type==='resource_organize'){
+    const groups=Array.isArray(payload.groups)?payload.groups:[]
+    let moved=0,folders=0
+    const run=db.transaction(()=>{
+      for(const group of groups){
+        const courseId=Number(group.course_id||0),ids=[...new Set((group.resource_ids||[]).map(Number).filter(Boolean))]
+        if(!courseId||!ids.length)continue
+        let folderId=Number(group.folder_id||0)
+        const folder=folderId?db.prepare('SELECT id FROM resource_folders WHERE id=? AND uploader_id=? AND course_id=?').get(folderId,user.id,courseId):null
+        if(!folder){const created=db.prepare('INSERT INTO resource_folders (course_id,name,description,tags,uploader_id,created_at) VALUES (?,?,?,?,?,?)').run(courseId,String(group.folder_name||'Agent 整理资料').slice(0,100),'由总 Agent 根据资料库结构创建，可自行修改。',Array.isArray(group.tags)?group.tags.join(',').slice(0,300):'',user.id,now());folderId=Number(created.lastInsertRowid);folders++}
+        for(const resourceId of ids){
+          const resource=db.prepare('SELECT * FROM resources WHERE id=? AND uploader_id=? AND course_id=?').get(resourceId,user.id,courseId)
+          if(!resource)continue
+          const tags=[...new Set(`${resource.tags||''},${Array.isArray(group.tags)?group.tags.join(','):''}`.split(',').map(item=>item.trim()).filter(Boolean))].join(',').slice(0,300)
+          db.prepare('UPDATE resources SET folder_id=?,tags=? WHERE id=? AND uploader_id=?').run(folderId,tags,resource.id,user.id)
+          moved++
+        }
+      }
+    })
+    run()
+    eventLog({actorUserId:user.id,eventType:'root_agent_resource_organized',scope:{},payload:{moved,folders},status:'done'})
+    return `已整理 ${moved} 份你上传且尚未归档的资料，并创建或复用了 ${folders} 个资料文件夹。`
+  }
+  if(request.action_type==='forum_publish'){
+    const draft=db.prepare('SELECT * FROM agent_forum_drafts WHERE id=? AND user_id=? AND status=?').get(Number(payload.draft_id),user.id,'draft')
+    if(!draft)throw new Error('论坛草稿不存在、已发布或无权操作')
+    const options=safeJson(draft.poll_options_json,[]),blocked=moderationError(draft.title,draft.content,draft.poll_question,...options)
+    if(blocked)throw new Error(blocked)
+    if((draft.poll_question&&!options.length)||(!draft.poll_question&&options.length)||options.length===1)throw new Error('草稿中的投票信息不完整，请先重新生成草稿')
+    const create=db.transaction(()=>{const post=db.prepare('INSERT INTO forum_posts (author_id,category,title,content) VALUES (?,?,?,?)').run(user.id,draft.category,draft.title,draft.content);if(draft.poll_question)db.prepare('INSERT INTO forum_polls (post_id,question,options_json) VALUES (?,?,?)').run(post.lastInsertRowid,draft.poll_question,JSON.stringify(options));db.prepare("UPDATE agent_forum_drafts SET status='published',published_post_id=?,updated_at=? WHERE id=?").run(post.lastInsertRowid,now(),draft.id);return Number(post.lastInsertRowid)})
+    const postId=create()
+    eventLog({actorUserId:user.id,eventType:'root_agent_forum_draft_published',scope:{draft_id:draft.id},payload:{post_id:postId},status:'done'})
+    return `已将草稿发布到校园论坛（帖子 #${postId}）。`
   }
   if(request.action_type==='peer_delegation'){
     const policy=collaborationPolicyOf(Number(payload.agent_owner_id),Number(payload.course_id))
@@ -1557,6 +1678,9 @@ app.post('/api/learning/quizzes/:id/submit',auth,async(req,res)=>{
 function supervisorActionsFor (user, content='') {
   const text=String(content||'')
   const actions=[]
+  if(/(?:帮我|请|我要|我想).{0,18}(?:完成|推进|制定|规划|准备|冲刺|安排|带我完成).{0,120}(?:学习|复习|考试|课程|项目|任务)|(?:学习|复习|考试|课程|项目|任务).{0,80}(?:计划|规划|路线|怎么完成)/.test(text)){
+    actions.push({type:'create_project',label:'交给总 Agent 建立项目并拆解',description:'总 Agent 会将目标拆成学习计划、个人资料整理、论坛经验收集和同课程 Agent 协作四个可追踪步骤；涉及外部操作时仍需你确认。',goal:text.slice(0,1000)})
+  }
   if(/(群聊|学习群|小组|同组).{0,20}(协作|讨论|交流|辩论)|让.{0,12}@?.{0,20}(讨论|辩论)/.test(text)){
     const count=db.prepare("SELECT COUNT(*) count FROM conversations c JOIN conversation_members cm ON cm.conversation_id=c.id WHERE cm.user_id=? AND c.type='group'").get(user.id).count
     if(count)actions.push({type:'open_group_discussion',label:'选择学习群并发起多 Agent 讨论',description:'我的 Agent 已识别到群协作任务；选择群和参与 Agent 后会按提案、质询、修订、总结执行。'})
@@ -1704,26 +1828,117 @@ app.post('/api/agent/threads/:id/generate-output',auth,async(req,res)=>{
 })
 app.get('/api/agent/platform-permissions',auth,(req,res)=>res.json(publicPlatformPermissions(platformPermissionsOf(req.user.id))))
 app.put('/api/agent/platform-permissions',auth,(req,res)=>{
-  const fields=['allow_group_post','allow_friend_broadcast','allow_group_task','allow_peer_delegation']
+  const fields=['allow_group_post','allow_friend_broadcast','allow_group_task','allow_peer_delegation','allow_resource_manage','allow_forum_publish']
   const values=fields.map(field=>req.body?.[field]?1:0)
-  db.prepare(`INSERT INTO agent_platform_permissions (user_id,${fields.join(',')},updated_at) VALUES (?,?,?,?,?,?)
+  db.prepare(`INSERT INTO agent_platform_permissions (user_id,${fields.join(',')},updated_at) VALUES (?,${fields.map(()=>'?').join(',')},?)
     ON CONFLICT(user_id) DO UPDATE SET ${fields.map(field=>`${field}=excluded.${field}`).join(',')},updated_at=excluded.updated_at`).run(req.user.id,...values,now())
   eventLog({actorUserId:req.user.id,eventType:'root_agent_permissions_updated',scope:{},payload:publicPlatformPermissions(platformPermissionsOf(req.user.id)),status:'done'})
   res.json({message:'我的 Agent 平台权限已更新。它只会在你当前对话明确下达指令时执行，所有操作均会记录。',permissions:publicPlatformPermissions(platformPermissionsOf(req.user.id))})
+})
+app.get('/api/agent/projects',auth,(req,res)=>res.json(projectsOf(req.user.id)))
+app.post('/api/agent/projects',auth,(req,res)=>{
+  const goal=String(req.body?.goal||'').trim().replace(/\s+/g,' ')
+  if(goal.length<6)return res.status(400).json({error:'请用至少 6 个字说明你希望总 Agent 推进的学习目标'})
+  if(goal.length>1000)return res.status(400).json({error:'目标说明不能超过 1000 个字符'})
+  const blueprint=rootProjectBlueprint(goal),title=String(req.body?.title||blueprint.title).trim().slice(0,100)||blueprint.title
+  const create=db.transaction(()=>{
+    const projectId=Number(db.prepare("INSERT INTO agent_projects (user_id,title,goal,summary,status,created_at,updated_at) VALUES (?,?,?,?, 'active',?,?)").run(req.user.id,title,goal,blueprint.summary,now(),now()).lastInsertRowid)
+    const add=db.prepare('INSERT INTO agent_project_steps (project_id,step_order,kind,title,description,status,action_type,created_at,updated_at) VALUES (?,?,?,?,?,\'pending\',?,?,?)')
+    blueprint.steps.forEach((step,index)=>add.run(projectId,index+1,step.kind,step.title,step.description,step.action_type,now(),now()))
+    return projectId
+  })
+  const projectId=create(),project=db.prepare('SELECT * FROM agent_projects WHERE id=?').get(projectId)
+  eventLog({actorUserId:req.user.id,eventType:'root_agent_project_created',scope:{project_id:projectId},payload:{goal},status:'done'})
+  res.status(201).json({message:'总 Agent 已建立项目，并拆分为可追踪步骤。',project:publicProject(project)})
+})
+app.patch('/api/agent/projects/:id',auth,(req,res)=>{
+  const project=db.prepare('SELECT * FROM agent_projects WHERE id=? AND user_id=?').get(req.params.id,req.user.id)
+  if(!project)return res.status(404).json({error:'项目不存在或无权修改'})
+  const status=String(req.body?.status||project.status)
+  if(!['active','paused','completed','archived'].includes(status))return res.status(400).json({error:'项目状态不正确'})
+  const title=req.body?.title===undefined?project.title:String(req.body.title).trim().slice(0,100)
+  if(!title)return res.status(400).json({error:'项目标题不能为空'})
+  db.prepare('UPDATE agent_projects SET title=?,status=?,updated_at=?,completed_at=? WHERE id=?').run(title,status,now(),status==='completed'?now():'',project.id)
+  res.json({message:status==='completed'?'项目已标记完成':'项目已更新',project:publicProject(db.prepare('SELECT * FROM agent_projects WHERE id=?').get(project.id))})
+})
+app.delete('/api/agent/projects/:id',auth,(req,res)=>{
+  const project=db.prepare('SELECT * FROM agent_projects WHERE id=? AND user_id=?').get(req.params.id,req.user.id)
+  if(!project)return res.status(404).json({error:'项目不存在或无权删除'})
+  db.transaction(()=>{
+    const actionIds=db.prepare('SELECT action_request_id FROM agent_project_steps WHERE project_id=? AND action_request_id IS NOT NULL').all(project.id).map(row=>row.action_request_id)
+    if(actionIds.length)db.prepare(`DELETE FROM agent_platform_action_requests WHERE user_id=? AND id IN (${actionIds.map(()=>'?').join(',')})`).run(req.user.id,...actionIds)
+    db.prepare('DELETE FROM agent_forum_drafts WHERE project_id=? AND user_id=?').run(project.id,req.user.id)
+    db.prepare('DELETE FROM agent_project_steps WHERE project_id=?').run(project.id)
+    db.prepare('DELETE FROM agent_projects WHERE id=?').run(project.id)
+  })()
+  eventLog({actorUserId:req.user.id,eventType:'root_agent_project_deleted',scope:{project_id:project.id},status:'done'})
+  res.json({message:'项目已删除；已经实际创建的学习计划、资料文件夹和论坛帖子不会被删除。'})
+})
+app.post('/api/agent/projects/:projectId/steps/:stepId/prepare',auth,async(req,res)=>{
+  const project=db.prepare('SELECT * FROM agent_projects WHERE id=? AND user_id=?').get(req.params.projectId,req.user.id)
+  const step=project&&db.prepare('SELECT * FROM agent_project_steps WHERE id=? AND project_id=?').get(req.params.stepId,project.id)
+  if(!project||!step)return res.status(404).json({error:'项目步骤不存在或无权操作'})
+  if(['done','skipped'].includes(step.status))return res.status(409).json({error:'该步骤已经完成'})
+  const user=userOf(req.user.id),permissions=platformPermissionsOf(req.user.id)
+  const setResult=(status,result={})=>db.prepare('UPDATE agent_project_steps SET status=?,result_json=?,updated_at=? WHERE id=?').run(status,JSON.stringify(result),now(),step.id)
+  const makeAction=(action)=>{
+    const request=createPlatformActionRequests(user.id,null,[action])[0]
+    linkProjectAction(step.id,request)
+    return request
+  }
+  try {
+    if(step.action_type==='project_plan'){
+      const proposal=projectPlanProposal(project)
+      const action=makeAction({type:'project_plan',label:'确认写入学习计划',description:`将创建“${proposal.title}”，之后仍可在学习计划页继续修改。`,payload:{project_id:project.id,...proposal}})
+      setResult('awaiting_confirmation',{proposal})
+      return res.json({message:'已准备学习计划，确认后才会写入学习计划页。',action,step:publicProjectStep(db.prepare('SELECT * FROM agent_project_steps WHERE id=?').get(step.id))})
+    }
+    if(step.action_type==='resource_organize'){
+      if(!permissions.allow_resource_manage)return res.status(403).json({error:'请先在“总 Agent 平台权限”开启“整理我的资料库”，再准备此步骤。',permission:'allow_resource_manage'})
+      const proposal=resourceOrganizationProposal(user.id,project.goal)
+      if(!proposal.groups.length){setResult('done',{message:'你的个人资料已全部位于文件夹中，无需再整理。',proposal});return res.json({message:'资料库无需整理，此步骤已完成。',step:publicProjectStep(db.prepare('SELECT * FROM agent_project_steps WHERE id=?').get(step.id))})}
+      const action=makeAction({type:'resource_organize',label:`确认整理 ${proposal.unfiled_count} 份资料`,description:'将只移动你自己上传且尚未归档的资料，并补充建议标签；不会删除原始文件。',payload:{project_id:project.id,groups:proposal.groups}})
+      setResult('awaiting_confirmation',{proposal})
+      return res.json({message:'已生成资料整理方案，确认后才会移动资料。',action,step:publicProjectStep(db.prepare('SELECT * FROM agent_project_steps WHERE id=?').get(step.id))})
+    }
+    if(step.action_type==='forum_draft'){
+      let draft=db.prepare("SELECT * FROM agent_forum_drafts WHERE project_id=? AND user_id=? AND status='draft' ORDER BY id DESC LIMIT 1").get(project.id,user.id)
+      if(!draft){const generated=await createProjectForumDraft(user,project);const saved=db.prepare('INSERT INTO agent_forum_drafts (user_id,project_id,title,content,category,poll_question,poll_options_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,\'draft\',?,?)').run(user.id,project.id,generated.title,generated.content,generated.category,generated.poll_question,JSON.stringify(generated.poll_options),now(),now());draft=db.prepare('SELECT * FROM agent_forum_drafts WHERE id=?').get(saved.lastInsertRowid)}
+      if(!permissions.allow_forum_publish){setResult('prepared',{draft_id:draft.id,requires_permission:'allow_forum_publish'});return res.json({message:'论坛草稿已生成并保存。预览后可开启“发布论坛草稿”权限，再次点击此步骤准备发布确认。',step:publicProjectStep(db.prepare('SELECT * FROM agent_project_steps WHERE id=?').get(step.id))})}
+      const action=makeAction({type:'forum_publish',label:'确认发布论坛草稿',description:'将以你的身份发布该草稿及其中的可选投票；发布前会再次检查敏感词。',payload:{project_id:project.id,draft_id:draft.id}})
+      setResult('awaiting_confirmation',{draft_id:draft.id})
+      return res.json({message:'论坛草稿已生成，确认后才会公开发布。',action,step:publicProjectStep(db.prepare('SELECT * FROM agent_project_steps WHERE id=?').get(step.id))})
+    }
+    if(step.action_type==='peer_collaboration'){
+      if(!permissions.allow_peer_delegation)return res.status(403).json({error:'请先在“总 Agent 平台权限”开启“同课程 Agent 委托”，再准备此步骤。',permission:'allow_peer_delegation'})
+      const course=courseMentionedIn(project.goal)||matchingCourseForPeerRequest(user.id,project.goal)
+      if(!course){setResult('prepared',{message:'请在项目目标中补充明确的课程名称，或从“同课程 Agent 协作”页面选择课程。'});return res.json({message:'当前无法确定协作课程，已保留该步骤等待你补充课程。',step:publicProjectStep(db.prepare('SELECT * FROM agent_project_steps WHERE id=?').get(step.id))})}
+      const candidate=collaborationCandidates(user.id,course.id)[0]
+      if(!candidate){setResult('prepared',{message:`暂未找到已开启“${course.name}”协作授权的其他 Agent。`});return res.json({message:`暂未找到“${course.name}”可协作的 Agent，可稍后重新准备。`,step:publicProjectStep(db.prepare('SELECT * FROM agent_project_steps WHERE id=?').get(step.id))})}
+      const action=makeAction({type:'peer_delegation',label:`确认咨询 ${candidate.agent_name}`,description:`将向已开启“${course.name}”授权的 Agent 发送学习协作申请；对方仍可审批、拒绝或撤回。`,payload:{project_id:project.id,course_id:course.id,course_name:course.name,agent_owner_id:candidate.owner_id,agent_name:candidate.agent_name,question:`请围绕这个学习目标给出可执行建议，并说明你允许共享的依据：${project.goal}`.slice(0,1200)}})
+      setResult('awaiting_confirmation',{course_name:course.name,candidate_name:candidate.agent_name})
+      return res.json({message:'已准备跨用户 Agent 协作申请，确认后才会联系对方。',action,step:publicProjectStep(db.prepare('SELECT * FROM agent_project_steps WHERE id=?').get(step.id))})
+    }
+    return res.status(400).json({error:'该项目步骤暂不支持自动准备'})
+  } catch(error) { return res.status(400).json({error:error.message||'准备项目步骤失败'}) }
 })
 app.post('/api/agent/platform-actions/:id/confirm',auth,async(req,res)=>{
   const request=db.prepare("SELECT * FROM agent_platform_action_requests WHERE id=? AND user_id=? AND status='pending'").get(req.params.id,req.user.id)
   if(!request)return res.status(404).json({error:'该 Agent 操作不存在、已处理或无权确认'})
   if(request.expires_at&&Date.parse(request.expires_at)<Date.now()){db.prepare("UPDATE agent_platform_action_requests SET status='expired' WHERE id=?").run(request.id);return res.status(410).json({error:'该操作确认已过期，请重新向我的 Agent 下达指令'})}
-  const permissionField={group_post:'allow_group_post',friend_broadcast:'allow_friend_broadcast',group_task:'allow_group_task',peer_delegation:'allow_peer_delegation'}[request.action_type]
-  if(!permissionField||!platformPermissionsOf(req.user.id)[permissionField])return res.status(403).json({error:'该平台权限已关闭，请在“我的 Agent → 总 Agent 平台权限”中重新开启后再下达指令'})
+  const permissionFields={group_post:'allow_group_post',friend_broadcast:'allow_friend_broadcast',group_task:'allow_group_task',peer_delegation:'allow_peer_delegation',project_plan:null,resource_organize:'allow_resource_manage',forum_publish:'allow_forum_publish'}
+  if(!Object.prototype.hasOwnProperty.call(permissionFields,request.action_type))return res.status(400).json({error:'该平台操作类型不受支持'})
+  const permissionField=permissionFields[request.action_type]
+  if(permissionField&&!platformPermissionsOf(req.user.id)[permissionField])return res.status(403).json({error:'该平台权限已关闭，请在“我的 Agent → 总 Agent 平台权限”中重新开启后再下达指令'})
   try {
     const message=await executePlatformActionRequest(request)
     db.prepare("UPDATE agent_platform_action_requests SET status='executed',executed_at=? WHERE id=?").run(now(),request.id)
+    db.prepare("UPDATE agent_project_steps SET status='done',result_json=?,updated_at=? WHERE action_request_id=?").run(JSON.stringify({message,executed_at:now()}),now(),request.id)
     if(request.thread_id)db.prepare("INSERT INTO agent_messages (thread_id,role,content,agent_type,attachments_json,actions_json) VALUES (?,?,?,'coordinator','[]','[]')").run(request.thread_id,'assistant',`**平台操作已完成**\n${message}`)
     res.json({message,status:'executed'})
   } catch(error) {
     db.prepare("UPDATE agent_platform_action_requests SET status='failed',executed_at=? WHERE id=?").run(now(),request.id)
+    db.prepare("UPDATE agent_project_steps SET status='prepared',updated_at=? WHERE action_request_id=?").run(now(),request.id)
     res.status(400).json({error:error.message||'平台操作执行失败'})
   }
 })

@@ -7,6 +7,7 @@
         <p class="label">我的专属 Agent</p>
         <div class="agent-card"><span class="agent-photo"><AvatarBadge :value="myProfile.agent_avatar || '✦'" :alt="myProfile.agent_name || '我的 Agent'" /></span><div><b>{{ myProfile.agent_name || '知行' }}</b><small>学习教练 · LangChain</small></div></div>
         <p class="hint">可以检索课程资料、规划学习、梳理错题，也能把回答生成学习成果文件。</p>
+        <button class="collaboration-entry project-entry" type="button" @click="openProjectCenter()">◈ 总 Agent 任务中心 <em v-if="activeProjectCount">{{ activeProjectCount }}</em></button>
         <button class="collaboration-entry" type="button" @click="openCollaboration">✦ 同课程 Agent 协作 <em v-if="pendingIncomingDelegations.length">{{ pendingIncomingDelegations.length }}</em></button>
         <button class="collaboration-entry memory-entry" type="button" @click="openMemoryDialog">▣ 群学习成果记忆 <em v-if="pendingMemoryCount">{{ pendingMemoryCount }}</em></button>
         <button class="collaboration-entry permission-entry" type="button" @click="openPermissionDialog">⚙ 总 Agent 平台权限</button>
@@ -117,6 +118,32 @@
         </article>
       </div>
     </el-dialog>
+    <el-dialog v-model="projectDialog" title="总 Agent 任务中心" width="min(960px, 96vw)" top="5vh">
+      <div class="project-panel">
+        <p>把一个较大的目标交给总 Agent：它会建立可追踪的学习项目，并把真正会影响平台数据或联系他人的动作留给你逐项确认。</p>
+        <form class="project-create" @submit.prevent="createProjectFromGoal()">
+          <textarea v-model="projectGoal" maxlength="1000" placeholder="例如：帮我在两周内完成数据结构期末复习，整理资料，了解高分同学的复习方法，并形成可执行计划。"></textarea>
+          <button class="primary" :disabled="projectLoading || projectGoal.trim().length < 6">{{ projectLoading ? '正在拆解…' : '建立并拆解项目' }}</button>
+        </form>
+        <div v-if="!projects.length" class="memory-empty">还没有项目。输入一个想完成的学习目标，让总 Agent 从这里开始带你推进。</div>
+        <div v-else class="project-list">
+          <article v-for="project in projects" :key="project.id" :class="['project-card', { selected: project.id === selectedProjectId }]" @click="selectedProjectId = project.id">
+            <div class="project-card-head"><span>{{ project.status === 'completed' ? '已完成' : project.status === 'paused' ? '已暂停' : '进行中' }}</span><small>{{ project.progress.done }}/{{ project.progress.total }} 步完成</small></div>
+            <b>{{ project.title }}</b><small>{{ project.goal }}</small>
+          </article>
+        </div>
+        <section v-if="selectedProject" class="project-detail">
+          <header><div><span>ROOT AGENT PROJECT</span><h3>{{ selectedProject.title }}</h3><small>{{ selectedProject.summary }}</small></div><aside><button v-if="selectedProject.status !== 'completed'" type="button" class="soft-button" @click="setProjectStatus(selectedProject, 'completed')">标记完成</button><button v-else type="button" class="soft-button" @click="setProjectStatus(selectedProject, 'active')">重新开启</button><button type="button" class="text-button" @click="deleteProject(selectedProject)">删除项目</button></aside></header>
+          <article v-for="step in selectedProject.steps" :key="step.id" :class="['project-step', step.status]">
+            <div class="step-index">{{ step.step_order }}</div>
+            <div class="step-main"><b>{{ step.title }}</b><small>{{ step.description }}</small><p v-if="step.result?.message">{{ step.result.message }}</p><p v-if="step.action_type === 'resource_organize' && step.result?.proposal">待整理 {{ step.result.proposal.unfiled_count }} 份未归档资料，检测到 {{ step.result.proposal.duplicates?.length || 0 }} 组同名文件。</p>
+              <details v-if="step.draft" class="forum-draft"><summary>查看论坛草稿：{{ step.draft.title }}</summary><h4>{{ step.draft.title }}</h4><p>{{ step.draft.content }}</p><small v-if="step.draft.poll_question">投票：{{ step.draft.poll_question }}（{{ step.draft.poll_options.join(' / ') }}）</small></details>
+            </div>
+            <aside class="step-actions"><span>{{ projectStepStatus(step.status) }}</span><button v-if="['pending','prepared'].includes(step.status)" type="button" class="soft-button" :disabled="projectActionLoading" @click="prepareProjectStep(selectedProject, step)">{{ step.status === 'prepared' && step.action_type === 'forum_draft' ? '准备发布确认' : '准备此步骤' }}</button><button v-if="step.status === 'awaiting_confirmation' && step.action?.status === 'pending'" type="button" class="primary small-primary" :disabled="projectActionLoading" @click="confirmProjectStep(step)">确认执行</button></aside>
+          </article>
+        </section>
+      </div>
+    </el-dialog>
     <el-dialog v-model="permissionDialog" title="我的 Agent 平台权限" width="min(620px, 94vw)">
       <div class="permission-panel">
         <p>这些权限只允许 Agent 为你准备操作，并且每一次真正的发送、转发、建任务或跨用户协作都仍需要你在对话内点击确认。系统会记录执行时间与范围。</p>
@@ -124,6 +151,8 @@
         <label class="permission-row"><span><b>准备好友转发</b><small>向所有当前好友转发前，展示收件人数和完整消息供你确认。</small></span><el-switch v-model="platformPermissions.allow_friend_broadcast" /></label>
         <label class="permission-row"><span><b>准备群任务</b><small>根据你的明确指令，在你所属学习群创建待办任务。</small></span><el-switch v-model="platformPermissions.allow_group_task" /></label>
         <label class="permission-row"><span><b>准备同课程 Agent 委托</b><small>仅匹配主动开启协作授权的 Agent；对方仍可审批、拒绝或撤回。</small></span><el-switch v-model="platformPermissions.allow_peer_delegation" /></label>
+        <label class="permission-row"><span><b>整理我的资料库</b><small>只准备移动本人上传且尚未归档的资料，并补充文件夹和标签建议；不会删除文件。</small></span><el-switch v-model="platformPermissions.allow_resource_manage" /></label>
+        <label class="permission-row"><span><b>发布论坛草稿</b><small>总 Agent 可先起草帖子；公开发布仍必须在项目步骤中逐次确认，并再次经过敏感词检查。</small></span><el-switch v-model="platformPermissions.allow_forum_publish" /></label>
       </div>
       <template #footer><button class="soft-button" type="button" @click="permissionDialog = false">取消</button><button class="primary" type="button" @click="savePlatformPermissions">保存权限</button></template>
     </el-dialog>
@@ -157,9 +186,12 @@ const courses = ref([]), collaborationDialog = ref(false), collaborationCourseId
 const collaborationPolicy = ref({ allow_matching: false, auto_respond: false, share_mastery: false, share_resource_titles: true })
 const artifactStudio = ref(false), artifactLoading = ref(false), artifactForm = ref({ mode: 'ppt', pages: 8, style: '课程复习', focus: '' })
 const memoryDialog = ref(false), memories = ref([]), memoryLoading = ref(false)
-const permissionDialog = ref(false), platformPermissions = ref({ allow_group_post: false, allow_friend_broadcast: false, allow_group_task: false, allow_peer_delegation: false })
+const permissionDialog = ref(false), platformPermissions = ref({ allow_group_post: false, allow_friend_broadcast: false, allow_group_task: false, allow_peer_delegation: false, allow_resource_manage: false, allow_forum_publish: false })
+const projectDialog = ref(false), projects = ref([]), projectGoal = ref(''), projectLoading = ref(false), projectActionLoading = ref(false), selectedProjectId = ref(null)
 const pendingIncomingDelegations = computed(() => delegations.value.filter(item => !item.is_requester && item.status === 'pending'))
 const pendingMemoryCount = computed(() => memories.value.filter(item => item.status === 'indexed' && item.sync_request?.status === 'pending').length)
+const activeProjectCount = computed(() => projects.value.filter(item => item.status === 'active').length)
+const selectedProject = computed(() => projects.value.find(item => item.id === selectedProjectId.value) || projects.value[0] || null)
 const incomingDelegations = computed(() => pendingIncomingDelegations.value)
 const autoHandledDelegations = computed(() => delegations.value.filter(item => !item.is_requester && ['processing', 'completed', 'failed'].includes(item.status)))
 const outgoingDelegations = computed(() => delegations.value.filter(item => item.is_requester))
@@ -237,7 +269,60 @@ async function openPermissionDialog () {
 async function savePlatformPermissions () {
   try { const data = await api('/agent/platform-permissions', { method: 'PUT', body: JSON.stringify(platformPermissions.value) }); platformPermissions.value = data.permissions; permissionDialog.value = false; ElMessage.success(data.message) } catch (error) { ElMessage.error(error.message) }
 }
+const projectStepStatus = status => ({ pending: '待准备', prepared: '已准备', awaiting_confirmation: '等待确认', done: '已完成', skipped: '已跳过' }[status] || status)
+async function refreshProjects () {
+  const data = await api('/agent/projects')
+  projects.value = data
+  if (!selectedProjectId.value || !data.some(item => item.id === selectedProjectId.value)) selectedProjectId.value = data[0]?.id || null
+  return data
+}
+async function openProjectCenter (goal = '') {
+  if (typeof goal === 'string' && goal.trim()) projectGoal.value = goal.trim()
+  try { await refreshProjects(); projectDialog.value = true } catch (error) { ElMessage.error(error.message) }
+}
+async function createProjectFromGoal (goal = projectGoal.value) {
+  const content = String(goal || '').trim()
+  if (content.length < 6) return ElMessage.warning('请先写清楚希望总 Agent 推进的学习目标')
+  projectLoading.value = true
+  try {
+    const data = await api('/agent/projects', { method: 'POST', body: JSON.stringify({ goal: content }) })
+    projectGoal.value = ''
+    selectedProjectId.value = data.project.id
+    await refreshProjects()
+    projectDialog.value = true
+    ElMessage.success(data.message)
+  } catch (error) { ElMessage.error(error.message) } finally { projectLoading.value = false }
+}
+async function prepareProjectStep (project, step) {
+  projectActionLoading.value = true
+  try {
+    const data = await post(`/agent/projects/${project.id}/steps/${step.id}/prepare`, {})
+    await refreshProjects()
+    ElMessage.success(data.message)
+  } catch (error) {
+    ElMessage.error(error.message)
+    if (error?.message?.includes('平台权限')) openPermissionDialog()
+  } finally { projectActionLoading.value = false }
+}
+async function confirmProjectStep (step) {
+  if (!step.action?.id) return
+  projectActionLoading.value = true
+  try {
+    const data = await post(`/agent/platform-actions/${step.action.id}/confirm`, {})
+    await refreshProjects()
+    await refreshDelegations()
+    ElMessage.success(data.message)
+  } catch (error) { ElMessage.error(error.message) } finally { projectActionLoading.value = false }
+}
+async function setProjectStatus (project, status) {
+  try { const data = await api(`/agent/projects/${project.id}`, { method: 'PATCH', body: JSON.stringify({ status }) }); await refreshProjects(); ElMessage.success(data.message) } catch (error) { ElMessage.error(error.message) }
+}
+async function deleteProject (project) {
+  if (!window.confirm(`确定删除“${project.title}”吗？已实际创建的计划、资料文件夹和论坛帖子不会被删除。`)) return
+  try { const data = await api(`/agent/projects/${project.id}`, { method: 'DELETE' }); await refreshProjects(); ElMessage.success(data.message) } catch (error) { ElMessage.error(error.message) }
+}
 async function handleSupervisorAction (action) {
+  if (action.type === 'create_project') return openProjectCenter(action.goal || '')
   if (['group_post', 'friend_broadcast', 'group_task', 'peer_delegation'].includes(action.type) && action.request_id) {
     try {
       const data = await post(`/agent/platform-actions/${action.request_id}/confirm`, {})
@@ -295,7 +380,7 @@ async function revokeDelegation (item) {
 }
 function openDelegation (id) { collaborationDialog.value = false; router.push(`/agent-collaboration/${id}`) }
 onMounted(() => {
-  Promise.all([loadThreads(), api('/user/profile').then(data => { myProfile.value = data }), api('/courses').then(data => { courses.value = data }), refreshDelegations(), refreshMemories(), api('/agent/platform-permissions').then(data => { platformPermissions.value = data })]).catch(error => ElMessage.error(error.message))
+  Promise.all([loadThreads(), api('/user/profile').then(data => { myProfile.value = data }), api('/courses').then(data => { courses.value = data }), refreshDelegations(), refreshMemories(), refreshProjects(), api('/agent/platform-permissions').then(data => { platformPermissions.value = data })]).catch(error => ElMessage.error(error.message))
   collaborationPollTimer = window.setInterval(() => { refreshDelegations().catch(() => {}) }, 10000)
 })
 onBeforeUnmount(() => { if (collaborationPollTimer) window.clearInterval(collaborationPollTimer) })
@@ -310,4 +395,5 @@ onBeforeUnmount(() => { if (collaborationPollTimer) window.clearInterval(collabo
 .learning-markdown{margin:5px 0 2px;color:#5f4437;line-height:1.75;overflow-wrap:anywhere}.learning-markdown :deep(p){margin:6px 0}.learning-markdown :deep(h2),.learning-markdown :deep(h3),.learning-markdown :deep(h4){margin:13px 0 6px;color:#6d3f2c;line-height:1.35}.learning-markdown :deep(h2){font-size:17px}.learning-markdown :deep(h3){font-size:15px}.learning-markdown :deep(h4){font-size:13px}.learning-markdown :deep(strong){color:#8d452d;font-weight:800}.learning-markdown :deep(em){color:#9a6552}.learning-markdown :deep(code){padding:2px 5px;border-radius:5px;background:#efe3db;color:#87503a;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.9em}.learning-markdown :deep(pre){margin:9px 0;padding:11px;overflow:auto;border-radius:12px;background:#3f302b;color:#fff4e8;white-space:pre-wrap;line-height:1.55}.learning-markdown :deep(pre code){padding:0;background:transparent;color:inherit}.learning-markdown :deep(hr){border:0;border-top:1px solid #e8d4c7;margin:12px 0}.learning-markdown :deep(.md-item){display:flex;gap:8px;margin:5px 0}.learning-markdown :deep(.md-item i){display:inline-grid;place-items:center;flex:0 0 18px;width:18px;height:18px;border-radius:50%;background:#f2d6c4;color:#9a5135;font-size:11px;font-style:normal;font-weight:800}.learning-markdown :deep(.md-item.ordered i){background:#e9e0f2;color:#72547f}.learning-markdown :deep(.md-space){height:5px}.inline-images{display:flex;flex-wrap:wrap;gap:8px;margin-top:9px}.inline-images button{max-width:min(100%,520px);overflow:hidden;border:1px solid #ecd9cd;border-radius:14px;padding:0;background:#fff;cursor:pointer}.inline-images img{display:block;width:100%;max-height:340px;object-fit:contain;background:#fff8f3}.inline-images span{display:block;padding:20px;color:#9b7667;font-size:12px}
 .collaboration-entry{width:100%;margin:6px 0 12px;border:1px dashed #e6c9b7;border-radius:13px;padding:9px 10px;background:#fff8f3;color:#9b583c;text-align:left;font-size:12px;font-weight:800;cursor:pointer}.collaboration-entry:hover{background:#fff0e5}.collaboration-entry em{float:right;min-width:17px;padding:1px 4px;border-radius:10px;background:#cf6943;color:#fff;text-align:center;font-size:10px;font-style:normal}.collaboration-panel{color:#694838}.collaboration-panel>p{margin:0 0 14px;color:#8d7568;font-size:12px;line-height:1.65}.collaboration-panel>label{display:grid;gap:6px;margin:12px 0;color:#694838;font-size:13px;font-weight:800}.collaboration-panel select,.collaboration-panel textarea{box-sizing:border-box;width:100%;border:1px solid #ead8cd;border-radius:12px;padding:10px;background:#fffdfa;color:#553a2d;font:inherit}.collaboration-panel textarea{min-height:76px;resize:vertical}.collaboration-panel hr{margin:16px 0;border:0;border-top:1px solid #f0e2d8}.policy-card{display:grid;gap:8px;margin-top:12px;padding:13px;border-radius:15px;background:#fff7f1}.policy-card>b,.candidate-list>b,.delegation-section>b{font-size:13px;color:#704735}.switch-row{display:flex!important;grid-template-columns:1fr auto!important;align-items:center;margin:0!important;font-size:12px!important;font-weight:600!important}.switch-row input{width:16px;height:16px;accent-color:#c96d42}.soft-button,.text-button{border:0;border-radius:10px;padding:7px 9px;background:#f7ebe4;color:#a05d41;font-size:12px;font-weight:700;cursor:pointer}.soft-button:hover,.text-button:hover{background:#f2ded1}.candidate-list,.delegation-section{display:grid;gap:8px;margin-top:15px}.candidate,.delegation{display:flex;align-items:center;gap:9px;padding:10px;border:1px solid #f0dfd4;border-radius:14px;background:#fffdfa}.candidate>div,.delegation>div{min-width:0;flex:1}.candidate b,.candidate small,.delegation b,.delegation small{display:block}.candidate small,.delegation small{margin-top:3px;color:#927b6e;font-size:11px;line-height:1.45}.candidate .avatar-badge{width:34px;height:34px}.delegation{align-items:flex-start}.delegation>span{display:flex;gap:6px;flex:none}.delegation.result{align-items:flex-start}.clickable-delegation{cursor:zoom-in}.clickable-delegation:hover{border-color:#dfbba7;background:#fff8f3}.delegation p{margin:7px 0 0;color:#76594b;font-size:12px;line-height:1.55;white-space:pre-wrap}.small-primary{padding:7px 9px;font-size:12px}.text-button{flex:none;background:transparent;color:#b56a4a}.primary:disabled,.soft-button:disabled{opacity:.55;cursor:not-allowed}@media(max-width:560px){.candidate,.delegation{align-items:flex-start;flex-wrap:wrap}.candidate .soft-button{margin-left:43px}.delegation>span{margin-left:43px}}
 .memory-entry{margin-top:-5px}.permission-entry{margin-top:-5px}.supervisor-actions{display:grid;gap:6px;margin-top:9px;padding:9px;border:1px dashed #dbbda9;border-radius:13px;background:#fff8f3}.supervisor-actions>span{font-size:11px;font-weight:800;color:#95644d}.supervisor-actions button{border:0;border-radius:10px;padding:7px 9px;background:#f3e3d8;color:#955036;text-align:left;font-size:12px;font-weight:700;cursor:pointer}.supervisor-actions button:hover{background:#eed4c5}.supervisor-actions button:disabled{opacity:.62;cursor:default}.supervisor-actions small{color:#9b7a69;font-size:11px;line-height:1.45}.memory-panel,.permission-panel{display:grid;gap:10px;color:#694838}.memory-panel>p,.permission-panel>p{margin:0;padding:10px 12px;border-radius:13px;background:#fff7f1;color:#8d7568;font-size:12px;line-height:1.65}.memory-empty{padding:25px 12px;color:#987d6e;text-align:center;font-size:13px}.memory-item{display:flex;align-items:flex-start;gap:10px;padding:11px;border:1px solid #f0dfd4;border-radius:15px;background:#fffdfa}.memory-item>div{display:grid;gap:4px;min-width:0;flex:1}.memory-item span{width:max-content;padding:2px 7px;border-radius:10px;background:#f4e5d8;color:#9a5d43;font-size:10px;font-weight:800}.memory-item.saved span{background:#e6f2e4;color:#4f8056}.memory-item.hidden{opacity:.7}.memory-item.hidden span{background:#eee8e3;color:#867569}.memory-item b{color:#704735;font-size:13px}.memory-item small{color:#856f63;font-size:12px;line-height:1.55;white-space:pre-wrap}.memory-item em{color:#ae9081;font-size:10px;font-style:normal}.memory-item aside{display:flex;flex:none;gap:5px}.permission-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:11px;border:1px solid #f0dfd4;border-radius:14px;background:#fffdfa}.permission-row span{display:grid;gap:4px;min-width:0}.permission-row b{font-size:13px;color:#704735}.permission-row small{color:#8d7568;font-size:11px;line-height:1.5}
+.project-entry{margin-top:-4px}.project-panel{display:grid;gap:13px;color:#694838}.project-panel>p{margin:0;padding:10px 12px;border-radius:13px;background:#fff7f1;color:#8d7568;font-size:12px;line-height:1.65}.project-create{display:grid;grid-template-columns:1fr auto;gap:9px}.project-create textarea{box-sizing:border-box;min-height:76px;width:100%;resize:vertical;border:1px solid #ead8cd;border-radius:14px;padding:11px;background:#fffdfa;color:#553a2d;font:inherit}.project-create .primary{align-self:end}.project-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;max-height:205px;overflow:auto;padding-right:2px}.project-card{display:grid;gap:5px;min-height:92px;padding:11px;border:1px solid #f0dfd4;border-radius:15px;background:#fffdfa;cursor:pointer}.project-card:hover,.project-card.selected{border-color:#d99a7d;background:#fff6ef}.project-card-head{display:flex;justify-content:space-between;gap:8px}.project-card-head span{padding:2px 7px;border-radius:9px;background:#f7e5da;color:#a25b3d;font-size:10px;font-weight:800}.project-card b{overflow:hidden;color:#704735;font-size:13px;text-overflow:ellipsis;white-space:nowrap}.project-card small{display:-webkit-box;overflow:hidden;color:#8d7568;font-size:11px;line-height:1.45;-webkit-line-clamp:2;-webkit-box-orient:vertical}.project-card-head small{color:#a48879;white-space:nowrap}.project-detail{display:grid;gap:9px;max-height:55vh;overflow:auto;padding:14px;border:1px solid #ead8cd;border-radius:18px;background:#fffcf9}.project-detail>header{display:flex;justify-content:space-between;gap:12px}.project-detail>header span{color:#a68779;font-size:10px;font-weight:800;letter-spacing:1px}.project-detail>header h3{margin:4px 0;color:#5a3527;font-size:19px}.project-detail>header small{display:block;max-width:630px;color:#8d7568;font-size:11px;line-height:1.55}.project-detail>header aside{display:flex;align-items:flex-start;gap:5px;white-space:nowrap}.project-step{display:flex;gap:10px;align-items:flex-start;padding:11px;border:1px solid #f0dfd4;border-radius:15px;background:#fffdfa}.project-step.done{background:#f5fbf3;border-color:#d8ead4}.step-index{display:grid;place-items:center;flex:0 0 25px;width:25px;height:25px;border-radius:50%;background:#f0ded1;color:#a45b3d;font-size:12px;font-weight:800}.project-step.done .step-index{background:#dff0da;color:#518257}.step-main{display:grid;gap:4px;min-width:0;flex:1}.step-main b{color:#704735;font-size:13px}.step-main small,.step-main p{margin:0;color:#876f62;font-size:11px;line-height:1.55}.step-main p{padding:6px 8px;border-radius:9px;background:#fff6ef;color:#9a654d}.step-actions{display:grid;justify-items:end;gap:6px;flex:0 0 auto}.step-actions>span{padding:3px 7px;border-radius:9px;background:#f6e7dc;color:#a05b40;font-size:10px;font-weight:800;white-space:nowrap}.project-step.done .step-actions>span{background:#dff0da;color:#518257}.forum-draft{margin-top:4px;padding:8px 9px;border-radius:10px;background:#fff7f1;color:#76594b;font-size:12px}.forum-draft summary{cursor:pointer;color:#9b583c;font-weight:800}.forum-draft h4{margin:9px 0 5px;font-size:13px}.forum-draft p{margin:0 0 7px;padding:0;background:transparent;white-space:pre-wrap}.forum-draft small{display:block}@media(max-width:640px){.project-create{grid-template-columns:1fr}.project-create .primary{justify-self:end}.project-detail>header,.project-step{flex-direction:column}.project-detail>header aside,.step-actions{align-self:stretch;justify-items:start}.project-detail{max-height:60vh}.project-list{grid-template-columns:1fr}.step-actions{display:flex;align-items:center;flex-wrap:wrap}}
 </style>
