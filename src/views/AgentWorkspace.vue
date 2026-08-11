@@ -7,7 +7,7 @@
         <p class="label">我的专属 Agent</p>
         <div class="agent-card"><span class="agent-photo"><AvatarBadge :value="myProfile.agent_avatar || '✦'" :alt="myProfile.agent_name || '我的 Agent'" /></span><div><b>{{ myProfile.agent_name || '知行' }}</b><small>学习教练 · LangChain</small></div></div>
         <p class="hint">可以检索课程资料、规划学习、梳理错题，也能把回答生成学习成果文件。</p>
-        <button class="collaboration-entry" type="button" @click="openCollaboration">✦ 同课程 Agent 协作 <em v-if="incomingDelegations.length">{{ incomingDelegations.length }}</em></button>
+        <button class="collaboration-entry" type="button" @click="openCollaboration">✦ 同课程 Agent 协作 <em v-if="pendingIncomingDelegations.length">{{ pendingIncomingDelegations.length }}</em></button>
         <p class="label">近期对话</p>
         <div class="thread-list"><button v-for="thread in threads" :key="thread.id" :class="['thread', { active: thread.id === threadId }]" :title="threadPreview(thread)" @click="openThread(thread.id)">{{ threadPreview(thread) }}</button></div>
       </aside>
@@ -28,7 +28,59 @@
         </form>
       </section>
     </main>
-    <el-dialog v-model="collaborationDialog" title="同课程 Agent 协作" width="min(680px, 94vw)"><div class="collaboration-panel"><p>系统只会向允许协作的同课程 Agent 发送受控学习任务卡。跨用户协作使用你的 DeepSeek API Key，且不共享私聊、课表、完整计划或密钥。</p><label>协作课程<select v-model.number="collaborationCourseId" @change="loadCollaborationPolicy"><option :value="0">请选择课程</option><option v-for="course in courses" :key="course.id" :value="course.id">{{ course.name }}</option></select></label><div v-if="collaborationCourseId" class="policy-card"><b>我的协作设置</b><label class="switch-row"><span>允许同课程 Agent 向我发起学习协作</span><input v-model="collaborationPolicy.allow_matching" type="checkbox"></label><label class="switch-row"><span>同意后自动响应（会使用发起者的 API Key）</span><input v-model="collaborationPolicy.auto_respond" type="checkbox" :disabled="!collaborationPolicy.allow_matching"></label><label class="switch-row"><span>可分享知识点掌握度摘要</span><input v-model="collaborationPolicy.share_mastery" type="checkbox"></label><label class="switch-row"><span>可分享我上传的资料标题</span><input v-model="collaborationPolicy.share_resource_titles" type="checkbox"></label><button class="soft-button" type="button" @click="saveCollaborationPolicy">保存本课程设置</button></div><hr><label>想向同课程 Agent 了解什么？<textarea v-model="delegationQuestion" maxlength="1200" placeholder="例如：我想在三天内复习树和图，请给我一个可执行的复习顺序。"></textarea></label><button class="primary" type="button" :disabled="!collaborationCourseId || !delegationQuestion.trim() || collaborationLoading" @click="searchCollaborationCandidates">{{ collaborationLoading ? '正在匹配…' : '寻找可协作的 Agent' }}</button><div v-if="candidates.length" class="candidate-list"><b>可协作的同课程 Agent</b><div v-for="candidate in candidates" :key="candidate.owner_id" class="candidate"><AvatarBadge :value="candidate.agent_avatar" :alt="candidate.agent_name" /><div><b>{{ candidate.agent_name }}</b><small>{{ candidate.label }} · {{ candidate.sharing.auto_respond ? '可自动响应' : '需主人同意' }}</small></div><button class="soft-button" type="button" @click="requestDelegation(candidate)">发起委托</button></div></div><hr><div v-if="incomingDelegations.length" class="delegation-section"><b>等待你授权的协作申请</b><div v-for="item in incomingDelegations" :key="item.id" class="delegation"><div><b>{{ item.requester_agent_name || '学习伙伴 Agent' }}</b><small>{{ item.course_name }} · {{ item.question }}</small></div><span><button class="soft-button" type="button" @click="respondDelegation(item, 'reject')">拒绝</button><button class="primary small-primary" type="button" @click="respondDelegation(item, 'approve')">同意并协作</button></span></div></div><div v-if="outgoingDelegations.length" class="delegation-section"><b>我的协作记录</b><div v-for="item in outgoingDelegations" :key="item.id" class="delegation result"><div><b>{{ item.owner_agent_name || '学习伙伴 Agent' }} · {{ delegationStatus(item.status) }}</b><small>{{ item.course_name }} · {{ item.question }}</small><p v-if="item.synthesis"><strong>整合建议：</strong>{{ item.synthesis }}</p><p v-else-if="item.peer_answer"><strong>同伴建议：</strong>{{ item.peer_answer }}</p></div><button v-if="['pending','processing','completed'].includes(item.status)" class="text-button" type="button" @click="revokeDelegation(item)">撤回</button></div></div></div></el-dialog>
+    <el-dialog v-model="collaborationDialog" title="同课程 Agent 协作" width="min(680px, 94vw)">
+      <div class="collaboration-panel">
+        <p>系统只会向允许协作的同课程 Agent 发送受控学习任务卡。跨用户协作使用你的 DeepSeek API Key，且不共享私聊、课表、完整计划或密钥。</p>
+        <label>协作课程
+          <select v-model.number="collaborationCourseId" @change="loadCollaborationPolicy">
+            <option :value="0">请选择课程</option>
+            <option v-for="course in courses" :key="course.id" :value="course.id">{{ course.name }}</option>
+          </select>
+        </label>
+        <div v-if="collaborationCourseId" class="policy-card">
+          <b>我的协作设置</b>
+          <label class="switch-row"><span>允许同课程 Agent 向我发起学习协作</span><input v-model="collaborationPolicy.allow_matching" type="checkbox"></label>
+          <label class="switch-row"><span>同意后自动响应（会使用发起者的 API Key）</span><input v-model="collaborationPolicy.auto_respond" type="checkbox" :disabled="!collaborationPolicy.allow_matching"></label>
+          <label class="switch-row"><span>可分享知识点掌握度摘要</span><input v-model="collaborationPolicy.share_mastery" type="checkbox"></label>
+          <label class="switch-row"><span>可分享我上传的资料标题</span><input v-model="collaborationPolicy.share_resource_titles" type="checkbox"></label>
+          <button class="soft-button" type="button" @click="saveCollaborationPolicy">保存本课程设置</button>
+        </div>
+        <hr>
+        <label>想向同课程 Agent 了解什么？
+          <textarea v-model="delegationQuestion" maxlength="1200" placeholder="例如：我想在三天内复习树和图，请给我一个可执行的复习顺序。"></textarea>
+        </label>
+        <button class="primary" type="button" :disabled="!collaborationCourseId || !delegationQuestion.trim() || collaborationLoading" @click="searchCollaborationCandidates">{{ collaborationLoading ? '正在匹配…' : '寻找可协作的 Agent' }}</button>
+        <div v-if="candidates.length" class="candidate-list">
+          <b>可协作的同课程 Agent</b>
+          <div v-for="candidate in candidates" :key="candidate.owner_id" class="candidate">
+            <AvatarBadge :value="candidate.agent_avatar" :alt="candidate.agent_name" />
+            <div><b>{{ candidate.agent_name }}</b><small>{{ candidate.label }} · {{ candidate.sharing.auto_respond ? '可自动响应' : '需主人同意' }}</small></div>
+            <button class="soft-button" type="button" @click="requestDelegation(candidate)">发起委托</button>
+          </div>
+        </div>
+        <hr>
+        <div v-if="incomingDelegations.length" class="delegation-section">
+          <b>等待你授权的协作申请</b>
+          <div v-for="item in incomingDelegations" :key="item.id" class="delegation">
+            <div><b>{{ item.requester_agent_name || '学习伙伴 Agent' }}</b><small>{{ item.course_name }} · {{ item.question }}</small></div>
+            <span><button class="soft-button" type="button" @click="respondDelegation(item, 'reject')">拒绝</button><button class="primary small-primary" type="button" @click="respondDelegation(item, 'approve')">同意并协作</button></span>
+          </div>
+        </div>
+        <div v-if="autoHandledDelegations.length" class="delegation-section">
+          <b>已自动处理的协作请求</b>
+          <div v-for="item in autoHandledDelegations" :key="item.id" class="delegation result">
+            <div><b>{{ item.requester_agent_name || '学习伙伴 Agent' }} · {{ delegationStatus(item.status) }}</b><small>{{ item.course_name }} · {{ item.question }}</small><p>{{ delegationStatusNote(item.status) }}</p></div>
+          </div>
+        </div>
+        <div v-if="outgoingDelegations.length" class="delegation-section">
+          <b>我的协作记录</b>
+          <div v-for="item in outgoingDelegations" :key="item.id" class="delegation result">
+            <div><b>{{ item.owner_agent_name || '学习伙伴 Agent' }} · {{ delegationStatus(item.status) }}</b><small>{{ item.course_name }} · {{ item.question }}</small><p v-if="item.synthesis"><strong>整合建议：</strong>{{ item.synthesis }}</p><p v-else-if="item.peer_answer"><strong>同伴建议：</strong>{{ item.peer_answer }}</p></div>
+            <button v-if="['pending','processing','completed'].includes(item.status)" class="text-button" type="button" @click="revokeDelegation(item)">撤回</button>
+          </div>
+        </div>
+      </div>
+    </el-dialog>
     <div v-if="artifactStudio" class="artifact-modal" role="dialog" aria-modal="true">
       <form class="artifact-dialog" @submit.prevent="createProfessionalArtifact">
         <div class="dialog-head"><div><span>AI ARTIFACT STUDIO</span><h2>专业生成学习成果</h2></div><button type="button" class="close" @click="artifactStudio = false">×</button></div>
@@ -45,7 +97,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import AppNav from '../components/AppNav.vue'
 import AvatarBadge from '../components/AvatarBadge.vue'
@@ -55,8 +107,11 @@ const threads = ref([]), threadId = ref(null), messages = ref([]), input = ref('
 const courses = ref([]), collaborationDialog = ref(false), collaborationCourseId = ref(0), collaborationLoading = ref(false), candidates = ref([]), delegations = ref([]), delegationQuestion = ref('')
 const collaborationPolicy = ref({ allow_matching: false, auto_respond: false, share_mastery: false, share_resource_titles: true })
 const artifactStudio = ref(false), artifactLoading = ref(false), artifactForm = ref({ mode: 'ppt', pages: 8, style: '课程复习', focus: '' })
-const incomingDelegations = computed(() => delegations.value.filter(item => !item.is_requester && item.status === 'pending'))
+const pendingIncomingDelegations = computed(() => delegations.value.filter(item => !item.is_requester && item.status === 'pending'))
+const incomingDelegations = computed(() => pendingIncomingDelegations.value)
+const autoHandledDelegations = computed(() => delegations.value.filter(item => !item.is_requester && ['processing', 'completed', 'failed'].includes(item.status)))
 const outgoingDelegations = computed(() => delegations.value.filter(item => item.is_requester))
+let collaborationPollTimer = null
 const scroll = () => nextTick(() => { if (scrollBox.value) scrollBox.value.scrollTop = scrollBox.value.scrollHeight })
 const agentLabel = type => ({ tutor: '学习导师 Agent', retrieval: '资料检索 Agent', planner: '学习计划 Agent', reflection: '学习画像 Agent', artifact: '成果生成 Agent' }[type] || myProfile.value.agent_name || '知行')
 const threadPreview = thread => { const text = String(thread.preview || thread.title || '新的学习对话').replace(/\s+/g, ' ').trim() || '新的学习对话'; return text.length > 24 ? `${text.slice(0, 24)}…` : text }
@@ -120,6 +175,7 @@ async function requestDelegation (candidate) {
   } catch (error) { ElMessage.error(error.message) }
 }
 const delegationStatus = status => ({ pending: '等待对方授权', processing: '协作处理中', completed: '已完成', rejected: '对方已拒绝', revoked: '已撤回', failed: '协作失败' }[status] || status)
+const delegationStatusNote = status => ({ processing: '已按你的“自动响应”设置处理，无需手动同意。', completed: '该协作已按你的授权完成，结果已发送给发起者。', failed: '协作未完成，请让发起者检查自己的模型配置或稍后重试。' }[status] || '')
 async function respondDelegation (item, action) {
   try {
     const data = await api(`/agent/collaboration/delegations/${item.id}`, { method: 'PATCH', body: JSON.stringify({ action }) })
@@ -134,7 +190,11 @@ async function revokeDelegation (item) {
     await refreshDelegations()
   } catch (error) { ElMessage.error(error.message) }
 }
-onMounted(() => Promise.all([loadThreads(), api('/user/profile').then(data => { myProfile.value = data }), api('/courses').then(data => { courses.value = data }), refreshDelegations()]).catch(error => ElMessage.error(error.message)))
+onMounted(() => {
+  Promise.all([loadThreads(), api('/user/profile').then(data => { myProfile.value = data }), api('/courses').then(data => { courses.value = data }), refreshDelegations()]).catch(error => ElMessage.error(error.message))
+  collaborationPollTimer = window.setInterval(() => { refreshDelegations().catch(() => {}) }, 10000)
+})
+onBeforeUnmount(() => { if (collaborationPollTimer) window.clearInterval(collaborationPollTimer) })
 </script>
 
 <style scoped>
