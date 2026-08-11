@@ -12,6 +12,7 @@ import ForumPost from '../views/ForumPost.vue'
 import MessagesSocial from '../views/MessagesSocial.vue'
 import Profile from '../views/ProfileSettings.vue'
 import FriendAgentChat from '../views/FriendAgentChat.vue'
+import PeerAgentCollaboration from '../views/PeerAgentCollaboration.vue'
 import CourseResource from '../views/CourseResource.vue'
 import CourseFolder from '../views/CourseFolder.vue'
 import Quiz from '../views/Quiz.vue'
@@ -42,6 +43,7 @@ const routes = [
   { path: '/account', component: AccountCenter, beforeEnter: requireAuth },
   { path: '/profile/:id', component: Profile, beforeEnter: requireAuth },
   { path: '/friend-agent/:id', component: FriendAgentChat, beforeEnter: requireAuth },
+  { path: '/agent-collaboration/:id', component: PeerAgentCollaboration, beforeEnter: requireAuth },
   { path: '/community', component: ForumHome, beforeEnter: requireAuth },
   { path: '/community/:id', component: ForumPost, beforeEnter: requireAuth },
   { path: '/admin', component: AdminConsole, beforeEnter: requireAdmin }
