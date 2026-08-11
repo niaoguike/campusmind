@@ -8,6 +8,7 @@
         <div class="agent-card"><span class="agent-photo"><AvatarBadge :value="myProfile.agent_avatar || '✦'" :alt="myProfile.agent_name || '我的 Agent'" /></span><div><b>{{ myProfile.agent_name || '知行' }}</b><small>学习教练 · LangChain</small></div></div>
         <p class="hint">可以检索课程资料、规划学习、梳理错题，也能把回答生成学习成果文件。</p>
         <button class="collaboration-entry" type="button" @click="openCollaboration">✦ 同课程 Agent 协作 <em v-if="pendingIncomingDelegations.length">{{ pendingIncomingDelegations.length }}</em></button>
+        <button class="collaboration-entry memory-entry" type="button" @click="openMemoryDialog">▣ 群学习成果记忆 <em v-if="pendingMemoryCount">{{ pendingMemoryCount }}</em></button>
         <p class="label">近期对话</p>
         <div class="thread-list"><button v-for="thread in threads" :key="thread.id" :class="['thread', { active: thread.id === threadId }]" :title="threadPreview(thread)" @click="openThread(thread.id)">{{ threadPreview(thread) }}</button></div>
       </aside>
@@ -29,6 +30,10 @@
               </button>
             </div>
             <div v-if="message.attachments?.length" class="attachments"><button v-for="file in message.attachments.filter(file => !isImageAttachment(file))" :key="file.id" @click="downloadAttachment(file)">📎 {{ file.file_name }}</button></div>
+            <div v-if="message.role === 'assistant' && message.actions?.length" class="supervisor-actions">
+              <span>总 Agent 建议的下一步</span>
+              <button v-for="action in message.actions" :key="action.type" type="button" @click="handleSupervisorAction(action)">{{ action.label }}</button>
+            </div>
             <button v-if="message.role === 'assistant' && message.agent_run_id" class="trace-toggle" type="button" @click="toggleRunTrace(message.agent_run_id)">{{ openRunId === message.agent_run_id ? '收起协作过程' : '查看本次 Agent 协作过程' }}</button>
             <div v-if="message.role === 'assistant' && message.agent_run_id && openRunId === message.agent_run_id && runTraces[message.agent_run_id]" class="trace-box"><div v-for="step in runTraces[message.agent_run_id].steps" :key="step.id" :class="['trace-step', step.status]"><span>{{ step.status === 'done' ? '✓' : step.status === 'failed' ? '!' : '·' }}</span><div><b>{{ step.label }}</b><small>{{ step.output_summary || step.meta?.description }}</small><em v-if="step.citations?.length">引用 {{ step.citations.length }} 条课程资料</em></div></div></div>
             <div v-if="message.role === 'assistant'" class="exports"><button :disabled="outputLoading" @click="generateOutput('ppt')">生成 PPT</button><button :disabled="outputLoading" @click="generateOutput('word')">导出 Word</button><button :disabled="outputLoading" @click="generateOutput('pdf')">导出 PDF</button><button :disabled="outputLoading" @click="generateOutput('image')">生成学习图解</button><button :disabled="outputLoading" @click="generateOutput('file')">学习笔记</button></div>
@@ -96,6 +101,20 @@
         </div>
       </div>
     </el-dialog>
+    <el-dialog v-model="memoryDialog" title="群学习成果记忆" width="min(640px, 94vw)">
+      <div class="memory-panel">
+        <p>这里保存的是群任务的结论摘要与来源指针，不会把整个群聊、好友私聊或他人的个人计划复制到你的 Agent 中。</p>
+        <div v-if="!memories.length" class="memory-empty">还没有可同步的群协作成果。完成一次群内多 Agent 讨论后，成果会出现在这里。</div>
+        <article v-for="item in memories" :key="item.id" :class="['memory-item', item.status]">
+          <div><span>{{ memoryStatus(item.status) }}</span><b>{{ item.title }}</b><small>{{ item.summary }}</small><em>{{ item.created_at ? formatTime(item.created_at) : '' }}</em></div>
+          <aside>
+            <button v-if="item.status !== 'saved'" type="button" class="soft-button" @click="updateMemory(item, 'save')">保存</button>
+            <button v-if="item.status !== 'hidden'" type="button" class="text-button" @click="updateMemory(item, 'hide')">隐藏</button>
+            <button v-else type="button" class="soft-button" @click="updateMemory(item, 'restore')">恢复索引</button>
+          </aside>
+        </article>
+      </div>
+    </el-dialog>
     <div v-if="artifactStudio" class="artifact-modal" role="dialog" aria-modal="true">
       <form class="artifact-dialog" @submit.prevent="createProfessionalArtifact">
         <div class="dialog-head"><div><span>AI ARTIFACT STUDIO</span><h2>专业生成学习成果</h2></div><button type="button" class="close" @click="artifactStudio = false">×</button></div>
@@ -125,7 +144,9 @@ const threads = ref([]), threadId = ref(null), messages = ref([]), input = ref('
 const courses = ref([]), collaborationDialog = ref(false), collaborationCourseId = ref(0), collaborationLoading = ref(false), candidates = ref([]), delegations = ref([]), delegationQuestion = ref('')
 const collaborationPolicy = ref({ allow_matching: false, auto_respond: false, share_mastery: false, share_resource_titles: true })
 const artifactStudio = ref(false), artifactLoading = ref(false), artifactForm = ref({ mode: 'ppt', pages: 8, style: '课程复习', focus: '' })
+const memoryDialog = ref(false), memories = ref([]), memoryLoading = ref(false)
 const pendingIncomingDelegations = computed(() => delegations.value.filter(item => !item.is_requester && item.status === 'pending'))
+const pendingMemoryCount = computed(() => memories.value.filter(item => item.status === 'indexed' && item.sync_request?.status === 'pending').length)
 const incomingDelegations = computed(() => pendingIncomingDelegations.value)
 const autoHandledDelegations = computed(() => delegations.value.filter(item => !item.is_requester && ['processing', 'completed', 'failed'].includes(item.status)))
 const outgoingDelegations = computed(() => delegations.value.filter(item => item.is_requester))
@@ -182,6 +203,26 @@ async function openCollaboration () {
     await loadCollaborationPolicy()
   } catch (error) { ElMessage.error(error.message) }
 }
+const memoryStatus = status => ({ saved: '已保存', indexed: '待决定', hidden: '已隐藏' }[status] || '成果')
+async function refreshMemories () { memories.value = await api('/agent/memories') }
+async function openMemoryDialog () {
+  try { await refreshMemories(); memoryDialog.value = true } catch (error) { ElMessage.error(error.message) }
+}
+async function updateMemory (item, action) {
+  if (memoryLoading.value) return
+  memoryLoading.value = true
+  try {
+    const data = await api(`/agent/memories/${item.id}`, { method: 'PATCH', body: JSON.stringify({ action }) })
+    const index = memories.value.findIndex(memory => memory.id === item.id)
+    if (index >= 0) memories.value.splice(index, 1, data.memory)
+    ElMessage.success(data.message)
+  } catch (error) { ElMessage.error(error.message) } finally { memoryLoading.value = false }
+}
+async function handleSupervisorAction (action) {
+  if (action.type === 'open_group_discussion') return router.push('/messages')
+  if (action.type === 'open_peer_collaboration') return openCollaboration()
+  ElMessage.info(action.description || '此协作入口暂不可用')
+}
 async function saveCollaborationPolicy () {
   if (!collaborationCourseId.value) return ElMessage.warning('请先选择课程')
   try {
@@ -224,7 +265,7 @@ async function revokeDelegation (item) {
 }
 function openDelegation (id) { collaborationDialog.value = false; router.push(`/agent-collaboration/${id}`) }
 onMounted(() => {
-  Promise.all([loadThreads(), api('/user/profile').then(data => { myProfile.value = data }), api('/courses').then(data => { courses.value = data }), refreshDelegations()]).catch(error => ElMessage.error(error.message))
+  Promise.all([loadThreads(), api('/user/profile').then(data => { myProfile.value = data }), api('/courses').then(data => { courses.value = data }), refreshDelegations(), refreshMemories()]).catch(error => ElMessage.error(error.message))
   collaborationPollTimer = window.setInterval(() => { refreshDelegations().catch(() => {}) }, 10000)
 })
 onBeforeUnmount(() => { if (collaborationPollTimer) window.clearInterval(collaborationPollTimer) })
@@ -238,4 +279,5 @@ onBeforeUnmount(() => { if (collaborationPollTimer) window.clearInterval(collabo
 .trace-toggle{margin-top:8px;border:0;border-radius:10px;padding:6px 9px;background:#f1e9f7;color:#73528a;font-size:11px;font-weight:700;cursor:pointer}.trace-box{margin-top:8px;padding:9px;border-radius:13px;background:#fff8f4;border:1px solid #efded3}.trace-step{display:flex;gap:7px;padding:6px 0;color:#8a6b5c}.trace-step>span{display:inline-grid;place-items:center;width:18px;height:18px;border-radius:50%;background:#eadfd5;color:#a06a51;font-size:11px;font-weight:800}.trace-step.done>span{background:#e6f3e5;color:#53835a}.trace-step.failed>span{background:#fde7e1;color:#b14d39}.trace-step div{min-width:0}.trace-step b,.trace-step small,.trace-step em{display:block}.trace-step b{font-size:11px;color:#704735}.trace-step small{margin-top:2px;font-size:11px;line-height:1.45}.trace-step em{margin-top:2px;color:#8a678f;font-size:10px;font-style:normal}
 .learning-markdown{margin:5px 0 2px;color:#5f4437;line-height:1.75;overflow-wrap:anywhere}.learning-markdown :deep(p){margin:6px 0}.learning-markdown :deep(h2),.learning-markdown :deep(h3),.learning-markdown :deep(h4){margin:13px 0 6px;color:#6d3f2c;line-height:1.35}.learning-markdown :deep(h2){font-size:17px}.learning-markdown :deep(h3){font-size:15px}.learning-markdown :deep(h4){font-size:13px}.learning-markdown :deep(strong){color:#8d452d;font-weight:800}.learning-markdown :deep(em){color:#9a6552}.learning-markdown :deep(code){padding:2px 5px;border-radius:5px;background:#efe3db;color:#87503a;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.9em}.learning-markdown :deep(pre){margin:9px 0;padding:11px;overflow:auto;border-radius:12px;background:#3f302b;color:#fff4e8;white-space:pre-wrap;line-height:1.55}.learning-markdown :deep(pre code){padding:0;background:transparent;color:inherit}.learning-markdown :deep(hr){border:0;border-top:1px solid #e8d4c7;margin:12px 0}.learning-markdown :deep(.md-item){display:flex;gap:8px;margin:5px 0}.learning-markdown :deep(.md-item i){display:inline-grid;place-items:center;flex:0 0 18px;width:18px;height:18px;border-radius:50%;background:#f2d6c4;color:#9a5135;font-size:11px;font-style:normal;font-weight:800}.learning-markdown :deep(.md-item.ordered i){background:#e9e0f2;color:#72547f}.learning-markdown :deep(.md-space){height:5px}.inline-images{display:flex;flex-wrap:wrap;gap:8px;margin-top:9px}.inline-images button{max-width:min(100%,520px);overflow:hidden;border:1px solid #ecd9cd;border-radius:14px;padding:0;background:#fff;cursor:pointer}.inline-images img{display:block;width:100%;max-height:340px;object-fit:contain;background:#fff8f3}.inline-images span{display:block;padding:20px;color:#9b7667;font-size:12px}
 .collaboration-entry{width:100%;margin:6px 0 12px;border:1px dashed #e6c9b7;border-radius:13px;padding:9px 10px;background:#fff8f3;color:#9b583c;text-align:left;font-size:12px;font-weight:800;cursor:pointer}.collaboration-entry:hover{background:#fff0e5}.collaboration-entry em{float:right;min-width:17px;padding:1px 4px;border-radius:10px;background:#cf6943;color:#fff;text-align:center;font-size:10px;font-style:normal}.collaboration-panel{color:#694838}.collaboration-panel>p{margin:0 0 14px;color:#8d7568;font-size:12px;line-height:1.65}.collaboration-panel>label{display:grid;gap:6px;margin:12px 0;color:#694838;font-size:13px;font-weight:800}.collaboration-panel select,.collaboration-panel textarea{box-sizing:border-box;width:100%;border:1px solid #ead8cd;border-radius:12px;padding:10px;background:#fffdfa;color:#553a2d;font:inherit}.collaboration-panel textarea{min-height:76px;resize:vertical}.collaboration-panel hr{margin:16px 0;border:0;border-top:1px solid #f0e2d8}.policy-card{display:grid;gap:8px;margin-top:12px;padding:13px;border-radius:15px;background:#fff7f1}.policy-card>b,.candidate-list>b,.delegation-section>b{font-size:13px;color:#704735}.switch-row{display:flex!important;grid-template-columns:1fr auto!important;align-items:center;margin:0!important;font-size:12px!important;font-weight:600!important}.switch-row input{width:16px;height:16px;accent-color:#c96d42}.soft-button,.text-button{border:0;border-radius:10px;padding:7px 9px;background:#f7ebe4;color:#a05d41;font-size:12px;font-weight:700;cursor:pointer}.soft-button:hover,.text-button:hover{background:#f2ded1}.candidate-list,.delegation-section{display:grid;gap:8px;margin-top:15px}.candidate,.delegation{display:flex;align-items:center;gap:9px;padding:10px;border:1px solid #f0dfd4;border-radius:14px;background:#fffdfa}.candidate>div,.delegation>div{min-width:0;flex:1}.candidate b,.candidate small,.delegation b,.delegation small{display:block}.candidate small,.delegation small{margin-top:3px;color:#927b6e;font-size:11px;line-height:1.45}.candidate .avatar-badge{width:34px;height:34px}.delegation{align-items:flex-start}.delegation>span{display:flex;gap:6px;flex:none}.delegation.result{align-items:flex-start}.clickable-delegation{cursor:zoom-in}.clickable-delegation:hover{border-color:#dfbba7;background:#fff8f3}.delegation p{margin:7px 0 0;color:#76594b;font-size:12px;line-height:1.55;white-space:pre-wrap}.small-primary{padding:7px 9px;font-size:12px}.text-button{flex:none;background:transparent;color:#b56a4a}.primary:disabled,.soft-button:disabled{opacity:.55;cursor:not-allowed}@media(max-width:560px){.candidate,.delegation{align-items:flex-start;flex-wrap:wrap}.candidate .soft-button{margin-left:43px}.delegation>span{margin-left:43px}}
+.memory-entry{margin-top:-5px}.supervisor-actions{display:grid;gap:6px;margin-top:9px;padding:9px;border:1px dashed #dbbda9;border-radius:13px;background:#fff8f3}.supervisor-actions>span{font-size:11px;font-weight:800;color:#95644d}.supervisor-actions button{border:0;border-radius:10px;padding:7px 9px;background:#f3e3d8;color:#955036;text-align:left;font-size:12px;font-weight:700;cursor:pointer}.supervisor-actions button:hover{background:#eed4c5}.memory-panel{display:grid;gap:10px;color:#694838}.memory-panel>p{margin:0;padding:10px 12px;border-radius:13px;background:#fff7f1;color:#8d7568;font-size:12px;line-height:1.65}.memory-empty{padding:25px 12px;color:#987d6e;text-align:center;font-size:13px}.memory-item{display:flex;align-items:flex-start;gap:10px;padding:11px;border:1px solid #f0dfd4;border-radius:15px;background:#fffdfa}.memory-item>div{display:grid;gap:4px;min-width:0;flex:1}.memory-item span{width:max-content;padding:2px 7px;border-radius:10px;background:#f4e5d8;color:#9a5d43;font-size:10px;font-weight:800}.memory-item.saved span{background:#e6f2e4;color:#4f8056}.memory-item.hidden{opacity:.7}.memory-item.hidden span{background:#eee8e3;color:#867569}.memory-item b{color:#704735;font-size:13px}.memory-item small{color:#856f63;font-size:12px;line-height:1.55;white-space:pre-wrap}.memory-item em{color:#ae9081;font-size:10px;font-style:normal}.memory-item aside{display:flex;flex:none;gap:5px}
 </style>
