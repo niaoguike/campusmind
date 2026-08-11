@@ -248,6 +248,7 @@ async function handleSupervisorAction (action) {
     } catch (error) { ElMessage.error(error.message) }
     return
   }
+  if (action.type === 'open_platform_permissions') return openPermissionDialog()
   if (action.type === 'open_group_discussion') return router.push('/messages')
   if (action.type === 'open_peer_collaboration') return openCollaboration()
   ElMessage.info(action.description || '此协作入口暂不可用')

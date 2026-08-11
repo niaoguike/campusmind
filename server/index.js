@@ -95,6 +95,7 @@ const avatarUpload = multer({
 const resourceUploadDir = path.join(__dirname, 'uploads', 'resources')
 const agentUploadDir = path.join(__dirname, 'uploads', 'agent')
 const groupUploadDir = path.join(__dirname, 'uploads', 'group-agent')
+const friendAgentUploadDir = path.join(__dirname, 'uploads', 'friend-agent')
 const avatarUploadDir = path.join(__dirname, 'uploads', 'avatars')
 
 const DAY_MAP = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '日': 7, '天': 7, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7 }
@@ -266,6 +267,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS group_agents (conversation_id INTEGER NOT NULL, user_id INTEGER NOT NULL, auto_reply INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')), PRIMARY KEY(conversation_id, user_id));
   CREATE TABLE IF NOT EXISTS friend_agent_access (id INTEGER PRIMARY KEY AUTOINCREMENT, requester_id INTEGER NOT NULL, agent_owner_id INTEGER NOT NULL, status TEXT DEFAULT 'pending', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS friend_agent_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, requester_id INTEGER NOT NULL, agent_owner_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
+  CREATE TABLE IF NOT EXISTS friend_agent_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, requester_id INTEGER NOT NULL, agent_owner_id INTEGER NOT NULL, message_id INTEGER NOT NULL, file_name TEXT NOT NULL, file_path TEXT NOT NULL, mime_type TEXT DEFAULT '', file_size INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS forum_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, author_id INTEGER NOT NULL, category TEXT DEFAULT '学习交流', title TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS forum_comments (id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, author_id INTEGER NOT NULL, content TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS forum_polls (post_id INTEGER PRIMARY KEY, question TEXT NOT NULL, options_json TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
@@ -497,9 +499,13 @@ async function sendGroupAgentMessage ({ conversation, ownerId, content, kind='',
         let artifactContent=String(content||'')
         let title='群学习成果'
         if(['ppt','word','pdf'].includes(mode)){
-          const plan=await designLearningArtifact({apiKey:decryptSecret(billingUser.api_key),model:SUPPORTED_DEEPSEEK_MODELS.has(billingUser.model_type)?billingUser.model_type:'deepseek-v4-flash',mode,pages:mode==='ppt'?8:7,style:'课程复习',focus:'根据本次群聊讨论生成，适合小组共享',conversation:`群主题：${question}\n\nAgent 回复：${artifactContent}`})
-          title=plan.title
-          artifactContent=artifactPlanMarkdown(plan,mode)
+          try {
+            const plan=await designLearningArtifact({apiKey:decryptSecret(billingUser.api_key),model:SUPPORTED_DEEPSEEK_MODELS.has(billingUser.model_type)?billingUser.model_type:'deepseek-v4-flash',mode,pages:mode==='ppt'?8:7,style:'课程复习',focus:'根据本次群聊讨论生成，适合小组共享',conversation:`群主题：${question}\n\nAgent 回复：${artifactContent}`})
+            title=plan.title
+            artifactContent=artifactPlanMarkdown(plan,mode)
+          } catch (planError) {
+            console.warn('Group artifact planning fallback:',planError?.message)
+          }
         }
         attachments=[await saveGroupArtifact({conversationId:conversation.id,messageId,userId:ownerId,mode,title,content:artifactContent})]
         db.prepare('UPDATE messages SET attachments_json=? WHERE id=?').run(JSON.stringify(attachments),messageId)
@@ -615,6 +621,9 @@ if (!db.prepare("SELECT 1 FROM announcements WHERE title='受控多 Agent 群协
 }
 if (!db.prepare("SELECT 1 FROM announcements WHERE title='持续 Agent 协作与总 Agent 平台控制已上线' LIMIT 1").get()) {
   db.prepare('INSERT INTO announcements (title,content,is_pinned,author_id,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('持续 Agent 协作与总 Agent 平台控制已上线','学习群中同时 @ 两个或三个已加入的 Agent，即可发起持续协作；输入“停止协作”或点击停止即可结束，单次最多 12 轮后会自动总结并沉淀成果。群内 Agent 可按文字指令生成 PPT、Word、PDF、学习笔记等文件附件。我的 Agent 新增平台权限中心，可准备群发消息、创建群任务、同课程 Agent 委托等操作；为避免误发，每项实际外部操作仍须由本人在对话内点击确认后执行。',1,null,now(),now())
+}
+if (!db.prepare("SELECT 1 FROM announcements WHERE title='聊天 Agent 文档生成与委托已优化' LIMIT 1").get()) {
+  db.prepare('INSERT INTO announcements (title,content,is_pinned,author_id,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('聊天 Agent 文档生成与委托已优化','群内 Agent、好友 Agent 与我的 Agent 现在都可直接理解“生成文档、报告、讲义、Word、PPT、PDF、学习笔记”等自然语言指令，并在对应聊天消息下提供受保护的下载附件。持续多 Agent 协作若主题中含生成文件需求，会在自动总结后附上成果文件。我的 Agent 的“找其他 Agent 咨询”现会检查协作权限、课程和可用候选：权限未开启时可一键进入设置，满足条件时会生成待确认的协作委托卡片。',1,null,now(),now())
 }
 db.prepare("UPDATE resources SET file_path=REPLACE(file_path,'/uploads/resources/','/api/resources/files/') WHERE file_path LIKE '/uploads/resources/%'").run()
 for (const row of db.prepare("SELECT id,file_name FROM resources WHERE file_name!=''").all()) { const fixed=readableUploadName(row.file_name); if(fixed!==row.file_name) db.prepare('UPDATE resources SET file_name=? WHERE id=?').run(fixed,row.id) }
@@ -903,7 +912,7 @@ async function finalizeGroupAgentSession (sessionId, reason='') {
     const owner=userOf(participants[0].owner_user_id)
     const summary=await callExternalAgent(owner,`你是学习群协作总结 Agent。根据下面的多 Agent 连续讨论，写出简洁的“本阶段结论、仍有分歧、接下来建议”。不要暴露私人信息，也不要要求继续调用任何 Agent。\n\n协作主题：${session.topic}\n\n讨论内容：\n${turns}`,[{role:'user',content:'请整理本阶段协作成果。'}],billingUser)
     const content=String(summary||'本轮持续协作已结束，请结合群内发言继续完善。').slice(0,4000)
-    await sendGroupAgentMessage({conversation,ownerId:owner.id,content,kind:'session_summary',sessionId:session.id})
+    await sendGroupAgentMessage({conversation,ownerId:owner.id,content,kind:'session_summary',sessionId:session.id,artifactRequest:{billingUser,question:session.topic}})
     db.prepare('INSERT INTO group_summaries (conversation_id,content,agenda_json,proposals_json,created_by,created_at) VALUES (?,?,?,?,?,?)').run(conversation.id,content,JSON.stringify([]),JSON.stringify([]),session.initiator_id,now())
     promoteGroupOutcomeToMemories({run:{id:`session-${session.id}`,topic:session.topic},conversation,summary:content,turnCount:session.turn_count})
     db.prepare("UPDATE group_agent_sessions SET status='completed',stop_reason=?,stopped_at=?,updated_at=? WHERE id=?").run(reason||'协作完成',now(),now(),session.id)
@@ -1031,8 +1040,60 @@ app.get('/api/friend-agent/requests',auth,(req,res)=>res.json(db.prepare("SELECT
 app.get('/api/friend-agents/:ownerId/access',auth,(req,res)=>{const ownerId=Number(req.params.ownerId);if(!friends(req.user.id,ownerId))return res.status(403).json({error:'只能访问好友的 Agent'});res.json(db.prepare('SELECT status FROM friend_agent_access WHERE requester_id=? AND agent_owner_id=? ORDER BY id DESC LIMIT 1').get(req.user.id,ownerId)||{status:'none'})})
 app.post('/api/friend-agents/:ownerId/access',auth,(req,res)=>{const ownerId=Number(req.params.ownerId);if(!ownerId||!friends(req.user.id,ownerId))return res.status(403).json({error:'只能申请访问好友的 Agent'});if(!userOf(ownerId)?.api_key)return res.status(400).json({error:'好友尚未配置可用的模型'});const last=db.prepare('SELECT * FROM friend_agent_access WHERE requester_id=? AND agent_owner_id=? ORDER BY id DESC LIMIT 1').get(req.user.id,ownerId);if(last?.status==='approved')return res.json({status:'approved'});if(last?.status==='pending')return res.json({status:'pending'});db.prepare('INSERT INTO friend_agent_access (requester_id,agent_owner_id) VALUES (?,?)').run(req.user.id,ownerId);res.status(201).json({status:'pending',message:'已申请访问，等待好友同意'})})
 app.patch('/api/friend-agent/requests/:id',auth,(req,res)=>{const action=req.body.action,request=db.prepare("SELECT * FROM friend_agent_access WHERE id=? AND agent_owner_id=? AND status='pending'").get(req.params.id,req.user.id);if(!request)return res.status(404).json({error:'申请不存在或已处理'});if(!['approve','reject'].includes(action))return res.status(400).json({error:'无效操作'});db.prepare('UPDATE friend_agent_access SET status=?,updated_at=? WHERE id=?').run(action==='approve'?'approved':'rejected',now(),request.id);res.json({message:action==='approve'?'已同意对方与您的 Agent 对话':'已拒绝申请'})})
-app.get('/api/friend-agents/:ownerId/messages',auth,(req,res)=>{const ownerId=Number(req.params.ownerId);if(!db.prepare("SELECT 1 FROM friend_agent_access WHERE requester_id=? AND agent_owner_id=? AND status='approved'").get(req.user.id,ownerId))return res.status(403).json({error:'尚未获得好友授权'});res.json(db.prepare('SELECT role,content,created_at FROM friend_agent_messages WHERE requester_id=? AND agent_owner_id=? ORDER BY id').all(req.user.id,ownerId))})
-app.post('/api/friend-agents/:ownerId/messages',auth,async(req,res)=>{const ownerId=Number(req.params.ownerId),content=String(req.body.content||'').trim().slice(0,2000);if(!content)return res.status(400).json({error:'请输入内容'});if(!db.prepare("SELECT 1 FROM friend_agent_access WHERE requester_id=? AND agent_owner_id=? AND status='approved'").get(req.user.id,ownerId))return res.status(403).json({error:'尚未获得好友授权'});const owner=userOf(ownerId),requester=userOf(req.user.id);if(!owner?.api_key)return res.status(400).json({error:'好友的模型配置已不可用'});db.prepare("INSERT INTO friend_agent_messages (requester_id,agent_owner_id,role,content) VALUES (?,?, 'user', ?)").run(req.user.id,ownerId,content);try{const answer=await replyFromFriendAgent(owner,requester);db.prepare("INSERT INTO friend_agent_messages (requester_id,agent_owner_id,role,content) VALUES (?,?, 'assistant', ?)").run(req.user.id,ownerId,answer);res.json({answer})}catch(error){res.status(502).json({error:'好友 Agent 调用失败，请稍后重试'})}})
+function publicFriendAgentAttachment (item) {
+  return item && ({id:item.id,file_name:item.file_name,mime_type:item.mime_type,file_size:item.file_size,created_at:item.created_at,download_url:`/api/friend-agents/${item.agent_owner_id}/attachments/${item.id}/download`})
+}
+async function saveFriendAgentArtifact ({ requesterId, ownerId, messageId, mode, title, content }) {
+  let exportInfo
+  if(mode==='image'){
+    const savedName=`${crypto.randomUUID()}.svg`,fileName=`学习图解-${Date.now()}.svg`,body=studyCardSvg(title,content)
+    await fs.mkdir(friendAgentUploadDir,{recursive:true})
+    await fs.writeFile(path.join(friendAgentUploadDir,savedName),body,'utf8')
+    exportInfo={fileName,savedName,mime:'image/svg+xml',size:Buffer.byteLength(body)}
+  }else exportInfo=await createAgentExport({mode,title,content,directory:friendAgentUploadDir,id:crypto.randomUUID()})
+  const result=db.prepare('INSERT INTO friend_agent_attachments (requester_id,agent_owner_id,message_id,file_name,file_path,mime_type,file_size,created_at) VALUES (?,?,?,?,?,?,?,?)')
+    .run(requesterId,ownerId,messageId,exportInfo.fileName,exportInfo.savedName,exportInfo.mime,exportInfo.size,now())
+  return publicFriendAgentAttachment(db.prepare('SELECT * FROM friend_agent_attachments WHERE id=?').get(result.lastInsertRowid))
+}
+function friendAgentAttachmentsOf (messageId) {
+  return db.prepare('SELECT * FROM friend_agent_attachments WHERE message_id=? ORDER BY id').all(messageId).map(publicFriendAgentAttachment)
+}
+app.get('/api/friend-agents/:ownerId/messages',auth,(req,res)=>{
+  const ownerId=Number(req.params.ownerId)
+  if(!db.prepare("SELECT 1 FROM friend_agent_access WHERE requester_id=? AND agent_owner_id=? AND status='approved'").get(req.user.id,ownerId))return res.status(403).json({error:'尚未获得好友授权'})
+  const rows=db.prepare('SELECT id,role,content,created_at FROM friend_agent_messages WHERE requester_id=? AND agent_owner_id=? ORDER BY id').all(req.user.id,ownerId)
+  res.json(rows.map(row=>({...row,attachments:friendAgentAttachmentsOf(row.id)})))
+})
+app.get('/api/friend-agents/:ownerId/attachments/:attachmentId/download',auth,(req,res)=>{
+  const ownerId=Number(req.params.ownerId),attachment=db.prepare('SELECT * FROM friend_agent_attachments WHERE id=? AND requester_id=? AND agent_owner_id=?').get(req.params.attachmentId,req.user.id,ownerId)
+  if(!attachment||!db.prepare("SELECT 1 FROM friend_agent_access WHERE requester_id=? AND agent_owner_id=? AND status='approved'").get(req.user.id,ownerId))return res.status(404).json({error:'文件不存在或你已无权下载'})
+  res.type(attachment.mime_type||'application/octet-stream').download(path.join(friendAgentUploadDir,path.basename(attachment.file_path)),attachment.file_name,error=>{if(error&&!res.headersSent)res.status(error.code==='ENOENT'?404:500).json({error:'文件不存在或暂时无法下载'})})
+})
+app.post('/api/friend-agents/:ownerId/messages',auth,async(req,res)=>{
+  const ownerId=Number(req.params.ownerId),content=String(req.body.content||'').trim().slice(0,2000)
+  if(!content)return res.status(400).json({error:'请输入内容'})
+  if(!db.prepare("SELECT 1 FROM friend_agent_access WHERE requester_id=? AND agent_owner_id=? AND status='approved'").get(req.user.id,ownerId))return res.status(403).json({error:'尚未获得好友授权'})
+  const owner=userOf(ownerId),requester=userOf(req.user.id)
+  if(!owner?.api_key)return res.status(400).json({error:'好友的模型配置已不可用'})
+  db.prepare("INSERT INTO friend_agent_messages (requester_id,agent_owner_id,role,content) VALUES (?,?, 'user', ?)").run(req.user.id,ownerId,content)
+  try{
+    const result=await replyFromFriendAgent(owner,requester,content)
+    let answer=String(result.answer||'该 Agent 暂时没有生成有效回复。')
+    const saved=db.prepare("INSERT INTO friend_agent_messages (requester_id,agent_owner_id,role,content) VALUES (?,?, 'assistant', ?)").run(req.user.id,ownerId,answer)
+    const messageId=Number(saved.lastInsertRowid)
+    let attachments=[]
+    if(result.exportMode)try {
+      attachments=[await saveFriendAgentArtifact({requesterId:req.user.id,ownerId,messageId,mode:result.exportMode,title:`${owner.agent_name||owner.name+' 的 Agent'} 学习资料`,content:answer})]
+      answer+=`\n\n已按你的指令生成可下载的 ${result.exportMode==='ppt'?'PPT':result.exportMode==='word'?'Word 文档':result.exportMode==='pdf'?'PDF 文档':'学习笔记'}，请点击下方附件。`
+      db.prepare('UPDATE friend_agent_messages SET content=? WHERE id=?').run(answer,messageId)
+    } catch(error) {
+      console.error('Friend agent artifact error:',error?.message)
+      answer+=`\n\n（本次文件生成失败，请检查模型额度或稍后重试。）`
+      db.prepare('UPDATE friend_agent_messages SET content=? WHERE id=?').run(answer,messageId)
+    }
+    res.json({answer,attachments})
+  }catch(error){res.status(502).json({error:'好友 Agent 调用失败，请稍后重试'})}
+})
 const CONTENT_BLOCKED_TERMS=[...new Set(['赌博','色情','裸聊','毒品','诈骗','自杀','恐怖袭击','暴力恐怖','代写作业','出售答案','买答案','作弊器','办证',...(process.env.CONTENT_BLOCKED_WORDS||'').split(',').map(item=>item.trim()).filter(Boolean)])]
 function moderationError (...texts) { const content=texts.join('\n').toLowerCase(); const hit=CONTENT_BLOCKED_TERMS.find(term=>content.includes(term.toLowerCase())); return hit?`发布失败：内容包含不适合在校园论坛发布的敏感词“${hit}”`:'' }
 function forumPoll (postId,userId) { const poll=db.prepare('SELECT * FROM forum_polls WHERE post_id=?').get(postId);if(!poll)return null;const options=JSON.parse(poll.options_json),counts=Array(options.length).fill(0);for(const row of db.prepare('SELECT option_index,COUNT(*) count FROM forum_votes WHERE post_id=? GROUP BY option_index').all(postId))if(counts[row.option_index]!==undefined)counts[row.option_index]=row.count;return {question:poll.question,options,counts,total:counts.reduce((sum,count)=>sum+count,0),my_vote:db.prepare('SELECT option_index FROM forum_votes WHERE post_id=? AND user_id=?').get(postId,userId)?.option_index??null} }
@@ -1059,6 +1120,20 @@ function collaborationCandidates (requesterId, courseId) {
     ORDER BY CASE WHEN p.course_id=? THEN 0 ELSE 1 END,p.updated_at DESC`).all(requesterId,courseId,courseId)
   const found=new Set()
   return rows.filter(row=>{if(found.has(row.owner_id))return false;found.add(row.owner_id);return true}).slice(0,8).map(row=>({owner_id:row.owner_id,agent_name:row.agent_name||'学习伙伴 Agent',agent_avatar:row.agent_avatar||'✦',label:'同课程学习伙伴',sharing:{mastery:!!row.share_mastery,resource_titles:!!row.share_resource_titles,auto_respond:!!row.auto_respond}}))
+}
+function peerAgentRequestIntent (content = '') {
+  const text=String(content||'')
+  return /(?:找|寻找|请|向|联系|委托|让).{0,40}(?:agent|智能体|学习伙伴|同学).{0,48}(?:咨询|询问|问|请教|交流|协作|经验|建议|帮忙|了解)|(?:咨询|询问|请教|交流|协作|经验|建议).{0,40}(?:agent|智能体|学习伙伴|同学)/i.test(text)
+}
+function matchingCourseForPeerRequest (requesterId, content = '') {
+  const text=String(content||'')
+  const exact=db.prepare('SELECT * FROM courses ORDER BY LENGTH(name) DESC').all().find(item=>text.includes(item.name))
+  if(exact)return exact
+  const eligible=db.prepare(`SELECT DISTINCT c.* FROM courses c
+    WHERE EXISTS(SELECT 1 FROM agent_collaboration_policies p JOIN users u ON u.id=p.user_id
+      WHERE p.user_id<>? AND p.allow_matching=1 AND COALESCE(u.account_status,'active')='active' AND p.course_id IN (c.id,0))
+    ORDER BY c.id`).all(requesterId)
+  return eligible.length===1?eligible[0]:null
 }
 function platformPermissionsOf (userId) {
   return db.prepare('SELECT * FROM agent_platform_permissions WHERE user_id=?').get(userId)
@@ -1105,8 +1180,8 @@ function proposePlatformActions (user, content) {
     const title=commandPayload(text,['创建任务','新建任务','添加任务','创建','新建','添加'])
     if(title&&title!==text)add('group_task',`确认在“${group.title}”创建任务`,`任务标题：${title.slice(0,120)}`,{conversation_id:group.id,conversation_title:group.title,title:title.slice(0,100)})
   }
-  if(permissions.allow_peer_delegation&&/(?:找|寻找|请|向).{0,32}(?:agent|智能体|学习伙伴).{0,32}(?:问|请教|交流|协作|经验)/i.test(text)){
-    const course=db.prepare('SELECT * FROM courses ORDER BY LENGTH(name) DESC').all().find(item=>text.includes(item.name))
+  if(permissions.allow_peer_delegation&&peerAgentRequestIntent(text)){
+    const course=matchingCourseForPeerRequest(user.id,text)
     if(course){
       const candidate=collaborationCandidates(user.id,course.id)[0]
       if(candidate)add('peer_delegation',`确认委托 ${candidate.agent_name}`,`向一位已开启“${course.name}”协作授权的 Agent 发起请求；对方可拒绝或撤回。`,{course_id:course.id,course_name:course.name,agent_owner_id:candidate.owner_id,agent_name:candidate.agent_name,question:text.slice(0,1200)})
@@ -1486,8 +1561,13 @@ function supervisorActionsFor (user, content='') {
     const count=db.prepare("SELECT COUNT(*) count FROM conversations c JOIN conversation_members cm ON cm.conversation_id=c.id WHERE cm.user_id=? AND c.type='group'").get(user.id).count
     if(count)actions.push({type:'open_group_discussion',label:'选择学习群并发起多 Agent 讨论',description:'我的 Agent 已识别到群协作任务；选择群和参与 Agent 后会按提案、质询、修订、总结执行。'})
   }
-  if(/(同学|他人|其他|满绩|高分).{0,28}(Agent|智能体).{0,28}(交流|协作|经验|请教)|(申请|寻找|联系).{0,30}(Agent|智能体)/i.test(text)){
-    actions.push({type:'open_peer_collaboration',label:'查找同课程 Agent 并发起授权申请',description:'我的 Agent 会使用你已配置的同课程协作入口；只会共享对方明确授权的学习摘要。'})
+  if(peerAgentRequestIntent(text)){
+    const permissions=platformPermissionsOf(user.id)
+    const course=matchingCourseForPeerRequest(user.id,text)
+    const candidate=course?collaborationCandidates(user.id,course.id)[0]:null
+    if(!permissions.allow_peer_delegation) actions.push({type:'open_platform_permissions',label:'开启“同课程 Agent 委托”权限',description:'开启后重新发送这条请求；我的 Agent 会先准备协作申请，再由你点击确认。'})
+    else if(!course) actions.push({type:'open_peer_collaboration',label:'选择课程后查找可协作的 Agent',description:'当前请求没有包含明确课程，且平台中不止一个可协作课程；请选择课程后再发起。'})
+    else if(!candidate) actions.push({type:'open_peer_collaboration',label:'查看同课程 Agent 协作状态',description:`暂未找到已授权“${course.name}”协作的其他 Agent；可在协作页查看候选和授权状态。`})
   }
   return actions
 }
@@ -1559,7 +1639,17 @@ function failPersonalRunTrace (runId, finalAgentType, error) {
 function attachmentContext (attachment) { return attachment.extracted_text ? `\n\n[附件：${attachment.file_name}]\n${attachment.extracted_text.slice(0,12000)}` : `\n\n[已附加文件：${attachment.file_name}；当前模型无法直接读取其中正文。]` }
 function escapeSvg (value) { return String(value||'').replace(/[&<>"']/g,char=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;' }[char])) }
 function studyCardSvg (title, content) { const plain=String(content||'').replace(/[＃#*_`>|]/g,' ').replace(/\s+/g,' ').trim(),lines=plain.match(/.{1,25}/g)?.slice(0,10)||['开始你的学习复盘'];const text=lines.map((line,index)=>`<text x="74" y="${190+index*48}" font-size="25" fill="#5f4437" font-family="Microsoft YaHei, sans-serif">${escapeSvg(line)}</text>`).join('');return `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760"><rect width="1200" height="760" rx="42" fill="#fff8f2"/><circle cx="1080" cy="85" r="150" fill="#f4c7a9" opacity=".55"/><rect x="56" y="54" width="146" height="42" rx="21" fill="#c96d42"/><text x="82" y="83" font-size="18" fill="white" font-family="Microsoft YaHei, sans-serif">CampusMind</text><text x="72" y="152" font-size="42" font-weight="700" fill="#663b2b" font-family="Microsoft YaHei, sans-serif">${escapeSvg(title).slice(0,42)}</text>${text}<text x="74" y="710" font-size="18" fill="#a27b68" font-family="Microsoft YaHei, sans-serif">由专属学习 Agent 根据当前对话生成</text></svg>` }
-function requestedExportMode (content = '') { const text = String(content).toLowerCase(); if (/(\.pptx?|ppt|幻灯片|演示文稿)/i.test(text)) return 'ppt'; if (/(\.docx?|word\s*(文档|文件)?|(?:导出|生成)\s*word)/i.test(text)) return 'word'; if (/(\.pdf|pdf\s*(文档|文件)?|(?:导出|生成)\s*pdf)/i.test(text)) return 'pdf'; if (/(学习笔记|markdown|md 文件)/i.test(text)) return 'markdown'; if (/(生成|制作|绘制|画一张|画个|输出).{0,16}(图片|图像|海报|图解|知识卡片|思维导图)|(图片|图像|海报|图解|知识卡片|思维导图).{0,10}(生成|制作|绘制)/i.test(text)) return 'image'; return '' }
+function requestedExportMode (content = '') {
+  const text = String(content).toLowerCase()
+  const asks = /(生成|制作|导出|整理成|写成|做成|输出|给我一份|帮我做)/i
+  if (/(\.pptx?|ppt|幻灯片|演示文稿)/i.test(text) && asks.test(text)) return 'ppt'
+  if (/(\.pdf|pdf\s*(文档|文件)?|(?:导出|生成)\s*pdf)/i.test(text) && asks.test(text)) return 'pdf'
+  if (/(\.docx?|word\s*(文档|文件)?|(?:导出|生成)\s*word)/i.test(text) && asks.test(text)) return 'word'
+  if (asks.test(text) && /(文档|报告|讲义|复习资料|学习资料|可下载文件|文件)/i.test(text)) return 'word'
+  if (asks.test(text) && /(学习笔记|笔记|提纲|大纲|markdown|md 文件)/i.test(text)) return 'markdown'
+  if (/(生成|制作|绘制|画一张|画个|输出).{0,16}(图片|图像|海报|图解|知识卡片|思维导图)|(图片|图像|海报|图解|知识卡片|思维导图).{0,10}(生成|制作|绘制)/i.test(text)) return 'image'
+  return ''
+}
 async function saveAgentExport (threadId, userId, mode, title, content) { const exportInfo = await createAgentExport({ mode, title, content, directory: agentUploadDir, id: crypto.randomUUID() }); const result = db.prepare('INSERT INTO agent_attachments (user_id,thread_id,file_name,file_path,mime_type,file_size,created_at) VALUES (?,?,?,?,?,?,?)').run(userId,threadId,exportInfo.fileName,exportInfo.savedName,exportInfo.mime,exportInfo.size,now()); return publicAgentAttachment(db.prepare('SELECT * FROM agent_attachments WHERE id=?').get(result.lastInsertRowid)) }
 async function saveAgentStudyImage (threadId, userId, title, content) { const safeName=`${crypto.randomUUID()}.svg`,fileName=`学习图解-${Date.now()}.svg`,body=studyCardSvg(title,content);await fs.mkdir(agentUploadDir,{recursive:true});await fs.writeFile(path.join(agentUploadDir,safeName),body,'utf8');const result=db.prepare('INSERT INTO agent_attachments (user_id,thread_id,file_name,file_path,mime_type,file_size,created_at) VALUES (?,?,?,?,?,?,?)').run(userId,threadId,fileName,safeName,'image/svg+xml',Buffer.byteLength(body),now());return publicAgentAttachment(db.prepare('SELECT * FROM agent_attachments WHERE id=?').get(result.lastInsertRowid)) }
 app.post('/api/agent/attachments',auth,agentAttachmentUpload.single('file'),async(req,res)=>{const file=req.file;let threadId=Number(req.body.thread_id||0);if(!file)return res.status(400).json({error:'请选择要上传的文件或图片'});if(!threadId)threadId=Number(db.prepare('INSERT INTO agent_threads (user_id,title) VALUES (?,?)').run(req.user.id,'带附件的学习对话').lastInsertRowid);if(!db.prepare('SELECT 1 FROM agent_threads WHERE id=? AND user_id=?').get(threadId,req.user.id))return res.status(403).json({error:'无权使用该对话'});const originalName=readableUploadName(file.originalname),safeName=`${crypto.randomUUID()}${path.extname(originalName).toLowerCase()}`,savedPath=path.join(agentUploadDir,safeName);let extracted='';try{await fs.mkdir(agentUploadDir,{recursive:true});await fs.writeFile(savedPath,file.buffer);if(!/^image\//i.test(file.mimetype||'')){const chunks=await extractResourceChunks(originalName,file.buffer).catch(()=>[]);extracted=chunks.map(item=>item.content).join('\n').slice(0,12000)}const result=db.prepare('INSERT INTO agent_attachments (user_id,thread_id,file_name,file_path,mime_type,file_size,extracted_text,created_at) VALUES (?,?,?,?,?,?,?,?)').run(req.user.id,threadId,originalName.slice(0,255),safeName,file.mimetype||'',file.size,extracted,now());const attachment=publicAgentAttachment(db.prepare('SELECT * FROM agent_attachments WHERE id=?').get(result.lastInsertRowid));res.status(201).json({thread_id:threadId,attachment,readable:!!extracted,message:extracted?'附件已上传，Agent 可读取其中的文本内容':'附件已上传；图片会作为附件保留，当前文本模型会依据你的文字说明进行分析'})}catch(error){await fs.unlink(savedPath).catch(()=>{});res.status(500).json({error:'附件保存或解析失败，请稍后重试'})}})
@@ -1755,7 +1845,13 @@ async function replyFromGroupAgent (conversation, ownerId, question, explicit, b
   eventLog({actorUserId:billingUser.id,targetUserId:ownerId,eventType:explicit?'group_agent_mentioned':'group_agent_auto_reply',scope:{conversation_id:conversation.id},payload:{question:String(question).slice(0,240),artifact:exportMode||''},status:'done'})
   return { answer:String(answer),attachments:saved.attachments }
 }
-async function replyFromFriendAgent (owner, requester) { const history=db.prepare('SELECT role,content FROM friend_agent_messages WHERE requester_id=? AND agent_owner_id=? ORDER BY id DESC LIMIT 12').all(requester.id,owner.id).reverse();const prompt=`你是 ${owner.name} 的 Agent「${owner.agent_name||'知行'}」，主人已授权 ${requester.name} 与你进行学习交流。仅回答课程学习、学习方法与公开资料相关问题；不得披露主人课表、计划、学习画像、记忆、聊天记录、身份信息或 API Key。用中文简洁、友善地回答，作业问题优先引导思路。`;return callExternalAgent(owner,prompt,history) }
+async function replyFromFriendAgent (owner, requester, question = '') {
+  const history=db.prepare('SELECT role,content FROM friend_agent_messages WHERE requester_id=? AND agent_owner_id=? ORDER BY id DESC LIMIT 12').all(requester.id,owner.id).reverse()
+  const exportMode=requestedExportMode(question)
+  const prompt=`你是 ${owner.name} 的 Agent「${owner.agent_name||'知行'}」，主人已授权 ${requester.name} 与你进行学习交流。仅回答课程学习、学习方法与公开资料相关问题；不得披露主人课表、计划、学习画像、记忆、聊天记录、身份信息或 API Key。用中文简洁、友善地回答，作业问题优先引导思路。${exportMode?'用户要求直接生成可下载文件；请将回答写成结构清晰、可直接导出为学习成果的完整内容，不要说“我无法生成文件”。':''}`
+  const answer=await callExternalAgent(owner,prompt,history)
+  return {answer,exportMode}
+}
 app.get('/api/health',(req,res)=>res.json({status:'ok',agent:'langchain',database:'sqlite'}))
 const PORT=process.env.PORT||3001
 app.listen(PORT,()=>console.log(`CampusMind server: http://localhost:${PORT}`))
