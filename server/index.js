@@ -232,7 +232,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS learning_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, summary TEXT NOT NULL, period_label TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS quizzes (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, thread_id INTEGER, course_id INTEGER, topic TEXT NOT NULL, title TEXT NOT NULL, quiz_json TEXT NOT NULL, answers_json TEXT DEFAULT '{}', result_json TEXT DEFAULT '{}', score REAL, total_score REAL, status TEXT DEFAULT 'created', created_at TEXT DEFAULT (datetime('now')), completed_at TEXT DEFAULT '');
   CREATE TABLE IF NOT EXISTS question_favorites (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, course_id INTEGER NOT NULL, quiz_id INTEGER NOT NULL, question_id TEXT NOT NULL, question_json TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')), UNIQUE(user_id,quiz_id,question_id));
-  CREATE TABLE IF NOT EXISTS agent_threads (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, title TEXT DEFAULT '新的学习对话', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
+  CREATE TABLE IF NOT EXISTS agent_threads (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, title TEXT DEFAULT '新的学习对话', mode TEXT DEFAULT 'study', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS agent_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, agent_type TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS agent_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, thread_id INTEGER NOT NULL, file_name TEXT NOT NULL, file_path TEXT NOT NULL, mime_type TEXT DEFAULT '', file_size INTEGER DEFAULT 0, extracted_text TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS conversation_reads (conversation_id INTEGER NOT NULL, user_id INTEGER NOT NULL, last_read_message_id INTEGER DEFAULT 0, updated_at TEXT DEFAULT (datetime('now')), PRIMARY KEY(conversation_id,user_id));
@@ -317,6 +317,7 @@ for (const column of [
   ,"ALTER TABLE messages ADD COLUMN attachments_json TEXT DEFAULT '[]'"
   ,"ALTER TABLE agent_platform_permissions ADD COLUMN allow_resource_manage INTEGER DEFAULT 0"
   ,"ALTER TABLE agent_platform_permissions ADD COLUMN allow_forum_publish INTEGER DEFAULT 0"
+  ,"ALTER TABLE agent_threads ADD COLUMN mode TEXT DEFAULT 'study'"
 ]) {
   try { db.exec(column) } catch { /* Existing databases already have this column. */ }
 }
@@ -1186,16 +1187,36 @@ function projectsOf (userId) {
 function userGroups (userId) {
   return db.prepare("SELECT c.* FROM conversations c JOIN conversation_members cm ON cm.conversation_id=c.id WHERE cm.user_id=? AND c.type='group' ORDER BY c.id DESC").all(userId)
 }
-function exactGroupInCommand (userId, content) {
+function normalizeGroupName (value='') {
+  return String(value||'').toLowerCase().replace(/[\s\u3000\-—_·•、，。！？:：;；()（）\[\]【】]/g,'')
+}
+function groupTargetInCommand (content='') {
   const text=String(content||'')
-  return userGroups(userId).find(group=>group.title&&text.includes(group.title))||null
+  const match=text.match(/(?:往|向|到|在|给)\s*([^\s，。！？、:：]{1,40}?(?:群|小组|讨论组))(?:里|中)?/)
+  return String(match?.[1]||'').trim()
+}
+function exactGroupInCommand (userId, content) {
+  const text=String(content||''),normalizedText=normalizeGroupName(text),target=groupTargetInCommand(text),normalizedTarget=normalizeGroupName(target)
+  const matches=userGroups(userId).filter(group=>{
+    const title=String(group.title||''),normalizedTitle=normalizeGroupName(title)
+    if(!normalizedTitle)return false
+    if(normalizedText.includes(normalizedTitle))return true
+    if(normalizedTarget&&(normalizedTitle.includes(normalizedTarget)||normalizedTarget.includes(normalizedTitle)))return true
+    const titleNumbers=title.match(/\d{2,}/g)||[]
+    return !!normalizedTarget&&titleNumbers.some(number=>normalizedTarget.includes(number))
+  })
+  return matches.length===1?matches[0]:null
 }
 function commandPayload (content, verbs) {
   const text=String(content||'').trim()
   const quoted=text.match(/[“\"]([^”\"]{1,1600})[”\"]/)?.[1]
   if(quoted)return quoted.trim()
-  const pattern=new RegExp(`(?:${verbs.join('|')})(?:消息|内容|通知)?\\s*(?:是|为|：|:|，|,)?\\s*([\\s\\S]{1,1600})$`,'i')
+  const pattern=new RegExp(`(?:${[...verbs].sort((a,b)=>b.length-a.length).join('|')})(?:消息|内容|通知)?\\s*(?:是|为|：|:|，|,)?\\s*([\\s\\S]{1,1600})$`,'i')
   return String(text.match(pattern)?.[1]||'').trim().replace(/^(?:到|给)\s*/,'')
+}
+function groupMessageIntent (content='') {
+  const text=String(content||'')
+  return /(?:发送|发消息|转发|通知|告诉|说|发).{0,28}(?:群|小组|讨论组)|(?:群|小组|讨论组).{0,28}(?:发送|发消息|转发|通知|告诉|说|发)/i.test(text)
 }
 function privateConversationFor (userId, friendId) {
   const existing=db.prepare("SELECT c.id FROM conversations c WHERE c.type='private' AND EXISTS(SELECT 1 FROM conversation_members a WHERE a.conversation_id=c.id AND a.user_id=?) AND EXISTS(SELECT 1 FROM conversation_members b WHERE b.conversation_id=c.id AND b.user_id=?) LIMIT 1").get(userId,friendId)
@@ -1208,8 +1229,8 @@ function proposePlatformActions (user, content) {
   const permissions=platformPermissionsOf(user.id),text=String(content||'').trim(),actions=[]
   const group=exactGroupInCommand(user.id,text)
   const add=(type,label,description,payload)=>actions.push({type,label,description,payload})
-  if(group&&permissions.allow_group_post&&/(发送|发消息|转发|通知|告诉|说)/.test(text)){
-    const payload=commandPayload(text,['发送','发消息','转发','通知','告诉','说'])
+  if(group&&permissions.allow_group_post&&groupMessageIntent(text)){
+    const payload=commandPayload(text,['发送','发消息','转发','通知','告诉','说','发'])
     if(payload&&payload!==text)add('group_post',`确认发送到“${group.title}”`,`将以你的身份发送：${payload.slice(0,120)}`,{conversation_id:group.id,conversation_title:group.title,content:payload.slice(0,2000)})
   }
   if(permissions.allow_friend_broadcast&&/(所有好友|全部好友|每个好友|全体好友)/.test(text)&&/(发送|发消息|转发|通知|告诉)/.test(text)){
@@ -1681,6 +1702,11 @@ app.post('/api/learning/quizzes/:id/submit',auth,async(req,res)=>{
 function supervisorActionsFor (user, content='') {
   const text=String(content||'')
   const actions=[]
+  if(groupMessageIntent(text)) {
+    const permissions=platformPermissionsOf(user.id),group=exactGroupInCommand(user.id,text)
+    if(!permissions.allow_group_post) actions.push({type:'open_platform_permissions',label:'开启“准备群消息”权限',description:'开启后重新发送这条消息。总 Agent 会先生成待确认的群消息卡，不会直接发送。'})
+    else if(!group) actions.push({type:'open_group_discussion',label:'打开学习协作并确认目标群',description:'没有唯一匹配到目标学习群。请使用群的完整名称，或在学习协作中打开目标群后再让总 Agent 准备消息。'})
+  }
   if(/(?:帮我|请|我要|我想).{0,18}(?:完成|推进|制定|规划|准备|冲刺|安排|带我完成).{0,120}(?:学习|复习|考试|课程|项目|任务)|(?:学习|复习|考试|课程|项目|任务).{0,80}(?:计划|规划|路线|怎么完成)|(?:帮我|请).{0,20}(?:整理|管理|归档|盘点).{0,36}(?:资料|资料库)|(?:帮我|请).{0,20}(?:收集|咨询|了解).{0,45}(?:论坛|同学|其他 Agent|学习经验)/i.test(text)){
     actions.push({type:'create_project',label:'交给总 Agent 建立项目并拆解',description:'总 Agent 会将目标拆成学习计划、个人资料整理、论坛经验收集和同课程 Agent 协作四个可追踪步骤；涉及外部操作时仍需你确认。',goal:text.slice(0,1000)})
   }
@@ -1779,7 +1805,7 @@ function requestedExportMode (content = '') {
 }
 async function saveAgentExport (threadId, userId, mode, title, content) { const exportInfo = await createAgentExport({ mode, title, content, directory: agentUploadDir, id: crypto.randomUUID() }); const result = db.prepare('INSERT INTO agent_attachments (user_id,thread_id,file_name,file_path,mime_type,file_size,created_at) VALUES (?,?,?,?,?,?,?)').run(userId,threadId,exportInfo.fileName,exportInfo.savedName,exportInfo.mime,exportInfo.size,now()); return publicAgentAttachment(db.prepare('SELECT * FROM agent_attachments WHERE id=?').get(result.lastInsertRowid)) }
 async function saveAgentStudyImage (threadId, userId, title, content) { const safeName=`${crypto.randomUUID()}.svg`,fileName=`学习图解-${Date.now()}.svg`,body=studyCardSvg(title,content);await fs.mkdir(agentUploadDir,{recursive:true});await fs.writeFile(path.join(agentUploadDir,safeName),body,'utf8');const result=db.prepare('INSERT INTO agent_attachments (user_id,thread_id,file_name,file_path,mime_type,file_size,created_at) VALUES (?,?,?,?,?,?,?)').run(userId,threadId,fileName,safeName,'image/svg+xml',Buffer.byteLength(body),now());return publicAgentAttachment(db.prepare('SELECT * FROM agent_attachments WHERE id=?').get(result.lastInsertRowid)) }
-app.post('/api/agent/attachments',auth,agentAttachmentUpload.single('file'),async(req,res)=>{const file=req.file;let threadId=Number(req.body.thread_id||0);if(!file)return res.status(400).json({error:'请选择要上传的文件或图片'});if(!threadId)threadId=Number(db.prepare('INSERT INTO agent_threads (user_id,title) VALUES (?,?)').run(req.user.id,'带附件的学习对话').lastInsertRowid);if(!db.prepare('SELECT 1 FROM agent_threads WHERE id=? AND user_id=?').get(threadId,req.user.id))return res.status(403).json({error:'无权使用该对话'});const originalName=readableUploadName(file.originalname),safeName=`${crypto.randomUUID()}${path.extname(originalName).toLowerCase()}`,savedPath=path.join(agentUploadDir,safeName);let extracted='';try{await fs.mkdir(agentUploadDir,{recursive:true});await fs.writeFile(savedPath,file.buffer);if(!/^image\//i.test(file.mimetype||'')){const chunks=await extractResourceChunks(originalName,file.buffer).catch(()=>[]);extracted=chunks.map(item=>item.content).join('\n').slice(0,12000)}const result=db.prepare('INSERT INTO agent_attachments (user_id,thread_id,file_name,file_path,mime_type,file_size,extracted_text,created_at) VALUES (?,?,?,?,?,?,?,?)').run(req.user.id,threadId,originalName.slice(0,255),safeName,file.mimetype||'',file.size,extracted,now());const attachment=publicAgentAttachment(db.prepare('SELECT * FROM agent_attachments WHERE id=?').get(result.lastInsertRowid));res.status(201).json({thread_id:threadId,attachment,readable:!!extracted,message:extracted?'附件已上传，Agent 可读取其中的文本内容':'附件已上传；图片会作为附件保留，当前文本模型会依据你的文字说明进行分析'})}catch(error){await fs.unlink(savedPath).catch(()=>{});res.status(500).json({error:'附件保存或解析失败，请稍后重试'})}})
+app.post('/api/agent/attachments',auth,agentAttachmentUpload.single('file'),async(req,res)=>{const file=req.file;const mode=req.body.mode==='action'?'action':'study';let threadId=Number(req.body.thread_id||0);if(!file)return res.status(400).json({error:'请选择要上传的文件或图片'});if(!threadId)threadId=Number(db.prepare('INSERT INTO agent_threads (user_id,title,mode) VALUES (?,?,?)').run(req.user.id,mode==='action'?'带附件的行动对话':'带附件的学习对话',mode).lastInsertRowid);const thread=db.prepare('SELECT id,mode FROM agent_threads WHERE id=? AND user_id=?').get(threadId,req.user.id);if(!thread)return res.status(403).json({error:'无权使用该对话'});if((thread.mode||'study')!==mode)return res.status(409).json({error:'附件所属对话与当前工作模式不一致，请切换到对应工作台后再使用。'});const originalName=readableUploadName(file.originalname),safeName=`${crypto.randomUUID()}${path.extname(originalName).toLowerCase()}`,savedPath=path.join(agentUploadDir,safeName);let extracted='';try{await fs.mkdir(agentUploadDir,{recursive:true});await fs.writeFile(savedPath,file.buffer);if(!/^image\//i.test(file.mimetype||'')){const chunks=await extractResourceChunks(originalName,file.buffer).catch(()=>[]);extracted=chunks.map(item=>item.content).join('\n').slice(0,12000)}const result=db.prepare('INSERT INTO agent_attachments (user_id,thread_id,file_name,file_path,mime_type,file_size,extracted_text,created_at) VALUES (?,?,?,?,?,?,?,?)').run(req.user.id,threadId,originalName.slice(0,255),safeName,file.mimetype||'',file.size,extracted,now());const attachment=publicAgentAttachment(db.prepare('SELECT * FROM agent_attachments WHERE id=?').get(result.lastInsertRowid));res.status(201).json({thread_id:threadId,attachment,readable:!!extracted,message:extracted?'附件已上传，Agent 可读取其中的文本内容':'附件已上传；图片会作为附件保留，当前文本模型会依据你的文字说明进行分析'})}catch(error){await fs.unlink(savedPath).catch(()=>{});res.status(500).json({error:'附件保存或解析失败，请稍后重试'})}})
 app.get('/api/agent/attachments/:id/download',auth,(req,res)=>{const attachment=db.prepare('SELECT * FROM agent_attachments WHERE id=? AND user_id=?').get(req.params.id,req.user.id);if(!attachment)return res.status(404).json({error:'附件不存在或无权访问'});const filePath=path.join(agentUploadDir,path.basename(attachment.file_path));res.type(attachment.mime_type||'application/octet-stream');res.sendFile(filePath,error=>{if(error&&!res.headersSent)res.status(error.code==='ENOENT'?404:500).json({error:'附件文件不存在'})})})
 app.post('/api/agent/threads/:id/generate-artifact',auth,async(req,res)=>{
   const threadId=Number(req.params.id),mode=String(req.body.mode||'ppt')
@@ -1977,8 +2003,16 @@ app.get('/api/agent/memory-sync-preferences',auth,(req,res)=>{
   if(!conversation||conversation.type!=='group'||!member(conversationId,req.user.id))return res.status(403).json({error:'只能查看自己所在学习群的成果同步偏好'})
   res.json(memoryPreferenceOf(req.user.id,conversationId))
 })
-app.get('/api/agent/threads',auth,(req,res)=>res.json(db.prepare(`SELECT t.*,COALESCE((SELECT m.content FROM agent_messages m WHERE m.thread_id=t.id ORDER BY m.id ASC LIMIT 1),t.title) AS preview FROM agent_threads t WHERE t.user_id=? ORDER BY t.updated_at DESC`).all(req.user.id)))
-app.post('/api/agent/threads',auth,(req,res)=>{const result=db.prepare('INSERT INTO agent_threads (user_id,title) VALUES (?,?)').run(req.user.id,(req.body.title||'新的学习对话').slice(0,50));res.status(201).json({id:result.lastInsertRowid})})
+app.get('/api/agent/threads',auth,(req,res)=>{
+  const mode=req.query.mode==='action'?'action':'study'
+  res.json(db.prepare(`SELECT t.*,COALESCE((SELECT m.content FROM agent_messages m WHERE m.thread_id=t.id ORDER BY m.id ASC LIMIT 1),t.title) AS preview FROM agent_threads t WHERE t.user_id=? AND COALESCE(t.mode,'study')=? ORDER BY t.updated_at DESC`).all(req.user.id,mode))
+})
+app.post('/api/agent/threads',auth,(req,res)=>{
+  const mode=req.body.mode==='action'?'action':'study'
+  const fallbackTitle=mode==='action'?'新的行动对话':'新的学习对话'
+  const result=db.prepare('INSERT INTO agent_threads (user_id,title,mode) VALUES (?,?,?)').run(req.user.id,(req.body.title||fallbackTitle).slice(0,50),mode)
+  res.status(201).json({id:result.lastInsertRowid,mode})
+})
 app.get('/api/agent/threads/:id/messages',auth,(req,res)=>{
   if(!db.prepare('SELECT 1 FROM agent_threads WHERE id=? AND user_id=?').get(req.params.id,req.user.id))return res.status(404).json({error:'对话不存在'})
   res.json(db.prepare('SELECT role,content,agent_type,agent_run_id,created_at,attachments_json,actions_json FROM agent_messages WHERE thread_id=? ORDER BY id').all(req.params.id).map(message=>({...message,attachments:JSON.parse(message.attachments_json||'[]'),actions:safeJson(message.actions_json,[])})))
@@ -1996,8 +2030,10 @@ app.post('/api/agent/chat',auth,async(req,res)=>{
   if((!content&&!attachmentIds.length)||content.length>4000)return res.status(400).json({error:'请输入学习问题或添加一个附件'})
   const user=userOf(req.user.id)
   if(!user?.api_key)return res.status(400).json({error:'NO_API_KEY',message:'请先在模型设置中绑定 DeepSeek API Key'})
-  if(!threadId)threadId=Number(db.prepare('INSERT INTO agent_threads (user_id,title) VALUES (?,?)').run(user.id,(content||'附件学习问题').slice(0,24)).lastInsertRowid)
-  if(!db.prepare('SELECT 1 FROM agent_threads WHERE id=? AND user_id=?').get(threadId,user.id))return res.status(403).json({error:'无权使用该对话'})
+  if(!threadId)threadId=Number(db.prepare('INSERT INTO agent_threads (user_id,title,mode) VALUES (?,?,?)').run(user.id,(content||`${mode==='action'?'行动任务':'学习问题'}`).slice(0,24),mode).lastInsertRowid)
+  const thread=db.prepare('SELECT id,mode FROM agent_threads WHERE id=? AND user_id=?').get(threadId,user.id)
+  if(!thread)return res.status(403).json({error:'无权使用该对话'})
+  if((thread.mode||'study')!==mode)return res.status(409).json({error:'该对话属于另一种工作模式。请在对应工作台中打开它，或新建当前模式的对话。'})
 
   const attachments=attachmentIds.length
     ?db.prepare(`SELECT * FROM agent_attachments WHERE user_id=? AND thread_id=? AND id IN (${attachmentIds.map(()=>'?').join(',')})`).all(user.id,threadId,...attachmentIds)
@@ -2011,6 +2047,7 @@ app.post('/api/agent/chat',auth,async(req,res)=>{
   const memoryBrief=accessibleMemoryBrief(user.id,content)
   if(memoryBrief) history.unshift({role:'system',content:memoryBrief})
   const supervisorActions=mode==='action'?[...platformActions,...supervisorActionsFor(user,content)]:[]
+  if(mode==='action'&&supervisorActions.length)history.unshift({role:'system',content:`系统已为本次请求准备以下待确认行动入口：${supervisorActions.map(action=>action.label).join('；')}。请说明这些操作仍需用户点击确认，不要称自己没有平台操作能力。`})
   history.unshift({role:'system',content:mode==='action'
     ?'当前处于“行动工作台”。你是用户的 CampusMind 总行动 Agent，可拆解复杂目标并协调学习计划、本人资料库、校园论坛、学习群和获授权的其他 Agent。只能使用系统生成的结构化操作入口，不得声称已经执行尚未确认的动作；发送消息、移动资料、公开发帖或联系其他用户 Agent 必须等用户点击确认。你没有服务器 Shell、任意数据库写入或部署权限。'
     :'当前处于“学习问答”。只提供课程解释、课程资料检索、练习辅导、学习建议、复盘和学习成果生成。不得创建或建议执行群发消息、论坛发布、资料移动、跨用户 Agent 委托或其他平台写操作；如果用户要求执行平台动作，请说明需要切换到“行动工作台”。'})

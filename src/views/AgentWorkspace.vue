@@ -194,9 +194,18 @@ const incomingDelegations = computed(() => pendingIncomingDelegations.value)
 const autoHandledDelegations = computed(() => delegations.value.filter(item => !item.is_requester && ['processing', 'completed', 'failed'].includes(item.status)))
 const outgoingDelegations = computed(() => delegations.value.filter(item => item.is_requester))
 let collaborationPollTimer = null
-function setAgentMode (mode) {
-  agentMode.value = mode === 'action' ? 'action' : 'study'
+async function setAgentMode (mode) {
+  const nextMode = mode === 'action' ? 'action' : 'study'
+  const changed = agentMode.value !== nextMode
+  agentMode.value = nextMode
   localStorage.setItem('campusmind_agent_mode', agentMode.value)
+  if (changed) {
+    threadId.value = null
+    messages.value = []
+    openRunId.value = null
+    pendingAttachments.value = []
+    await loadThreads()
+  }
   if (agentMode.value === 'study') {
     collaborationDialog.value = false
     memoryDialog.value = false
@@ -227,13 +236,13 @@ async function loadMessages (id = threadId.value) { const data = await api(`/age
 const agentLabel = type => ({ tutor: '学习导师 Agent', retrieval: '资料检索 Agent', planner: '学习计划 Agent', reflection: '学习画像 Agent', artifact: '成果生成 Agent' }[type] || myProfile.value.agent_name || '知行')
 const threadPreview = thread => { const text = String(thread.preview || thread.title || '新的学习对话').replace(/\s+/g, ' ').trim() || '新的学习对话'; return text.length > 24 ? `${text.slice(0, 24)}…` : text }
 async function toggleRunTrace (runId) { if (openRunId.value === runId) { openRunId.value = null; return }; try { if (!runTraces.value[runId]) runTraces.value[runId] = await api(`/agent/runs/${runId}`); openRunId.value = runId } catch (error) { ElMessage.error(error.message) } }
-async function loadThreads () { threads.value = await api('/agent/threads'); if (!threadId.value && threads.value[0]) await openThread(threads.value[0].id) }
+async function loadThreads () { threads.value = await api(`/agent/threads?mode=${agentMode.value}`); if (!threadId.value && threads.value[0]) await openThread(threads.value[0].id) }
 async function openThread (id) { threadId.value = id; openRunId.value = null; pendingAttachments.value = []; await loadMessages(id); scroll() }
-async function newThread () { const data = await post('/agent/threads', {}); await loadThreads(); await openThread(data.id) }
+async function newThread () { const data = await post('/agent/threads', { mode: agentMode.value }); await loadThreads(); await openThread(data.id) }
 const ask = text => { input.value = text; send() }
-async function chooseAttachment (event) { const file = event.target.files?.[0]; if (!file) return; if (file.size > 15 * 1024 * 1024) { ElMessage.warning('单个附件不能超过 15MB'); event.target.value = ''; return }; uploading.value = true; const body = new FormData(); body.append('file', file); body.append('thread_id', threadId.value || ''); try { const data = await api('/agent/attachments', { method: 'POST', body }); threadId.value = data.thread_id; pendingAttachments.value.push(data.attachment); ElMessage.success(data.message); threads.value = await api('/agent/threads') } catch (error) { ElMessage.error(error.message) } finally { uploading.value = false; event.target.value = '' } }
+async function chooseAttachment (event) { const file = event.target.files?.[0]; if (!file) return; if (file.size > 15 * 1024 * 1024) { ElMessage.warning('单个附件不能超过 15MB'); event.target.value = ''; return }; uploading.value = true; const body = new FormData(); body.append('file', file); body.append('thread_id', threadId.value || ''); body.append('mode', agentMode.value); try { const data = await api('/agent/attachments', { method: 'POST', body }); threadId.value = data.thread_id; pendingAttachments.value.push(data.attachment); ElMessage.success(data.message); await loadThreads() } catch (error) { ElMessage.error(error.message) } finally { uploading.value = false; event.target.value = '' } }
 const removeAttachment = id => { pendingAttachments.value = pendingAttachments.value.filter(file => file.id !== id) }
-async function send () { const content = input.value.trim(), attachmentIds = pendingAttachments.value.map(file => file.id); if ((!content && !attachmentIds.length) || loading.value) return; loading.value = true; input.value = ''; messages.value.push({ role: 'user', content: content || '请阅读我上传的附件。', attachments: [...pendingAttachments.value], created_at: new Date().toISOString() }); pendingAttachments.value = []; scroll(); try { const data = await post('/agent/chat', { thread_id: threadId.value, content, attachment_ids: attachmentIds, mode: agentMode.value }); threadId.value = data.thread_id; await loadMessages(threadId.value); threads.value = await api('/agent/threads'); if (agentMode.value === 'action') await refreshProjects() } catch (error) { ElMessage.error(error.message); messages.value.pop() } finally { loading.value = false; scroll() } }
+async function send () { const content = input.value.trim(), attachmentIds = pendingAttachments.value.map(file => file.id); if ((!content && !attachmentIds.length) || loading.value) return; loading.value = true; input.value = ''; messages.value.push({ role: 'user', content: content || '请阅读我上传的附件。', attachments: [...pendingAttachments.value], created_at: new Date().toISOString() }); pendingAttachments.value = []; scroll(); try { const data = await post('/agent/chat', { thread_id: threadId.value, content, attachment_ids: attachmentIds, mode: agentMode.value }); threadId.value = data.thread_id; await loadMessages(threadId.value); await loadThreads(); if (agentMode.value === 'action') await refreshProjects() } catch (error) { ElMessage.error(error.message); messages.value.pop() } finally { loading.value = false; scroll() } }
 const formatTime = value => {
   if (!value) return ''
   const text = String(value).trim()
