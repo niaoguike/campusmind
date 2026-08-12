@@ -1923,7 +1923,13 @@ app.post('/api/agent/projects',auth,(req,res)=>{
   })
   const projectId=create(),project=db.prepare('SELECT * FROM agent_projects WHERE id=?').get(projectId)
   eventLog({actorUserId:req.user.id,eventType:'root_agent_project_created',scope:{project_id:projectId},payload:{goal},status:'done'})
-  res.status(201).json({message:'总 Agent 已建立项目，并拆分为可追踪步骤。',project:publicProject(project)})
+  const summary=[`**总 Agent 已建立行动任务：${project.title}**`,project.summary||'',...publicProject(project).steps.map(step=>`- ${step.step_order}. ${step.title}：${step.description}`)].filter(Boolean).join('\n')
+  const threadId=Number(req.body?.thread_id||0)
+  if(threadId&&db.prepare('SELECT 1 FROM agent_threads WHERE id=? AND user_id=?').get(threadId,req.user.id)) {
+    db.prepare("INSERT INTO agent_messages (thread_id,role,content,agent_type,attachments_json,actions_json) VALUES (?,?,?,'coordinator','[]','[]')").run(threadId,'assistant',summary)
+    db.prepare('UPDATE agent_threads SET updated_at=? WHERE id=?').run(now(),threadId)
+  }
+  res.status(201).json({message:'总 Agent 已建立项目，并将步骤写入当前对话。',project:publicProject(project),summary})
 })
 app.patch('/api/agent/projects/:id',auth,(req,res)=>{
   const project=db.prepare('SELECT * FROM agent_projects WHERE id=? AND user_id=?').get(req.params.id,req.user.id)
