@@ -1214,6 +1214,26 @@ function commandPayload (content, verbs) {
   const pattern=new RegExp(`(?:${[...verbs].sort((a,b)=>b.length-a.length).join('|')})(?:消息|内容|通知)?\\s*(?:是|为|：|:|，|,)?\\s*([\\s\\S]{1,1600})$`,'i')
   return String(text.match(pattern)?.[1]||'').trim().replace(/^(?:到|给)\s*/,'')
 }
+function friendsMentionedInCommand (userId, content='') {
+  const text=String(content||'')
+  const rows=db.prepare('SELECT u.id,u.name,u.student_id,u.avatar FROM friendships f JOIN users u ON u.id=f.friend_id WHERE f.user_id=? ORDER BY LENGTH(u.name) DESC,u.id').all(userId)
+  return rows.filter(friend=>String(friend.name||'').trim().length>=2&&text.includes(String(friend.name).trim()))
+}
+function friendMessageIntent (content='') {
+  const text=String(content||'')
+  return /(?:给|向|对)\s*[^\s，。！？、:：]{2,48}\s*(?:发送|发消息|转发|通知|告诉|说|发)(?:消息|内容|通知)?|(?:发送|发消息|转发|通知|告诉|说|发)(?:消息|内容|通知)?\s*(?:给|向|到)\s*[^\s，。！？、:：]{2,48}/i.test(text)
+}
+function friendMessagePayload (content='', friend) {
+  const text=String(content||'').trim()
+  const quoted=text.match(/[“\"]([^”\"]{1,1600})[”\"]/)?.[1]
+  if(quoted)return quoted.trim()
+  const escaped=String(friend?.name||'').replace(/[.*+?^${}()|[\]\\]/g,'\\$&')
+  if(!escaped)return ''
+  const afterName=new RegExp(`(?:给|向|对)\\s*${escaped}\\s*(?:发送|发消息|转发|通知|告诉|说|发)(?:消息|内容|通知)?\\s*(?:是|为|：|:|，|,)?\\s*([\\s\\S]{1,1600})$`,'i')
+  const beforeName=new RegExp(`(?:发送|发消息|转发|通知|告诉|说|发)(?:消息|内容|通知)?\\s*(?:给|向|到)\\s*${escaped}\\s*(?:是|为|：|:|，|,)?\\s*([\\s\\S]{1,1600})$`,'i')
+  const payload=text.match(afterName)?.[1]||text.match(beforeName)?.[1]||''
+  return String(payload).trim().replace(/^(?:一条|个|一下)\s*/,'')
+}
 function groupMessageIntent (content='') {
   const text=String(content||'')
   return /(?:发送|发消息|转发|通知|告诉|说|发).{0,28}(?:群|小组|讨论组)|(?:群|小组|讨论组).{0,28}(?:发送|发消息|转发|通知|告诉|说|发)/i.test(text)
@@ -1223,7 +1243,7 @@ function forumPublishIntent (content='') {
   return /(?:校园|学校|平台)?论坛/i.test(text)&&/(?:发帖|发布|发表|发(?:一)?(?:篇|个)|写(?:一)?(?:篇|个)|帖子)/i.test(text)
 }
 function normalizedActionIntent (value='') {
-  const allowed=new Set(['forum_publish','group_post','friend_broadcast','group_task','peer_delegation','resource_organize','none'])
+  const allowed=new Set(['forum_publish','group_post','friend_message','friend_broadcast','group_task','peer_delegation','resource_organize','none'])
   return allowed.has(String(value||''))?String(value):'none'
 }
 function actionDraftFallback (content='') {
@@ -1239,14 +1259,15 @@ function normalizeActionForumDraft (candidate, content) {
 }
 async function analyzeActionIntent (user, content='') {
   const groups=userGroups(user.id).map(group=>group.title).filter(Boolean).slice(0,30)
-  const prompt=`你是 CampusMind 行动意图分析器。只返回一个合法 JSON 对象，绝不执行平台操作。可选 intent 只有 forum_publish、group_post、friend_broadcast、group_task、peer_delegation、resource_organize、none。\n\n对于 forum_publish：只有用户明确希望在校园论坛公开发表时才选择，并提供 forum.title、forum.content、forum.category、forum.poll_question、forum.poll_options。内容应根据用户意图写成一篇友善的学习交流帖，不得编造事实、不得含敏感内容。\n对于 group_post：提取 group_target 与 message。只能从下列用户所在学习群中选择目标：${JSON.stringify(groups)}。\n对于其他操作只填写必要字段。若只是提问、解释、建议或不确定，intent 必须是 none。\n\nJSON 结构：{"intent":"none","confidence":0,"group_target":"","message":"","task_title":"","forum":{"title":"","content":"","category":"学习交流","poll_question":"","poll_options":[]}}`
+  const friendsList=db.prepare('SELECT u.name FROM friendships f JOIN users u ON u.id=f.friend_id WHERE f.user_id=? ORDER BY u.name LIMIT 50').all(user.id).map(item=>item.name)
+  const prompt=`你是 CampusMind 行动意图分析器。只返回一个合法 JSON 对象，绝不执行平台操作。可选 intent 只有 forum_publish、group_post、friend_message、friend_broadcast、group_task、peer_delegation、resource_organize、none。\n\n对于 forum_publish：只有用户明确希望在校园论坛公开发表时才选择，并提供 forum.title、forum.content、forum.category、forum.poll_question、forum.poll_options。内容应根据用户意图写成一篇友善的学习交流帖，不得编造事实、不得含敏感内容。\n对于 group_post：提取 group_target 与 message。只能从下列用户所在学习群中选择目标：${JSON.stringify(groups)}。\n对于 friend_message：只在用户明确点名以下好友且要求发送私聊消息时选择，可填写 friend_target 与 message。好友名单：${JSON.stringify(friendsList)}。\n对于其他操作只填写必要字段。若只是提问、解释、建议或不确定，intent 必须是 none。\n\nJSON 结构：{"intent":"none","confidence":0,"group_target":"","friend_target":"","message":"","task_title":"","forum":{"title":"","content":"","category":"学习交流","poll_question":"","poll_options":[]}}`
   try {
     const raw=await callExternalAgent(user,prompt,[{role:'user',content:String(content||'').slice(0,4000)}],user)
     const parsed=parseModelObject(raw,{})
     const confidence=Math.max(0,Math.min(1,Number(parsed.confidence)||0))
-    return {intent:confidence>=0.55?normalizedActionIntent(parsed.intent):'none',confidence,group_target:String(parsed.group_target||'').trim().slice(0,80),message:String(parsed.message||'').trim().slice(0,2000),task_title:String(parsed.task_title||'').trim().slice(0,100),forum:normalizeActionForumDraft(parsed.forum,content)}
+    return {intent:confidence>=0.55?normalizedActionIntent(parsed.intent):'none',confidence,group_target:String(parsed.group_target||'').trim().slice(0,80),friend_target:String(parsed.friend_target||'').trim().slice(0,80),message:String(parsed.message||'').trim().slice(0,2000),task_title:String(parsed.task_title||'').trim().slice(0,100),forum:normalizeActionForumDraft(parsed.forum,content)}
   } catch {
-    return {intent:'none',confidence:0,group_target:'',message:'',task_title:'',forum:actionDraftFallback(content)}
+    return {intent:'none',confidence:0,group_target:'',friend_target:'',message:'',task_title:'',forum:actionDraftFallback(content)}
   }
 }
 function saveDirectForumDraft (userId, draft) {
@@ -1266,6 +1287,13 @@ async function proposePlatformActions (user, content, actionIntent={}) {
   const semanticGroup=actionIntent.group_target?exactGroupInCommand(user.id,`向${actionIntent.group_target}${/(?:群|小组|讨论组)$/.test(actionIntent.group_target)?'':'群'}发消息`):null
   const group=exactGroupInCommand(user.id,text)||semanticGroup
   const add=(type,label,description,payload)=>actions.push({type,label,description,payload})
+  // 一对一私聊只在用户自己的好友列表中精确匹配，绝不在全站用户中按名称猜测。
+  const matchedFriends=friendsMentionedInCommand(user.id,text)
+  const directFriend=matchedFriends.length===1?matchedFriends[0]:null
+  if(directFriend&&friendMessageIntent(text)) {
+    const payload=friendMessagePayload(text,directFriend)||((actionIntent.intent==='friend_message'&&actionIntent.message)?actionIntent.message:'')
+    if(payload&&payload!==text)add('friend_message',`确认发送给好友“${directFriend.name}”`,`将以你的身份发送私聊消息：${payload.slice(0,120)}`,{friend_id:directFriend.id,friend_name:directFriend.name,content:payload.slice(0,2000)})
+  }
   if(group&&permissions.allow_group_post&&(groupMessageIntent(text)||actionIntent.intent==='group_post')){
     const payload=actionIntent.intent==='group_post'&&actionIntent.message?actionIntent.message:commandPayload(text,['发送','发消息','转发','通知','告诉','说','发'])
     if(payload&&payload!==text)add('group_post',`确认发送到“${group.title}”`,`将以你的身份发送：${payload.slice(0,120)}`,{conversation_id:group.id,conversation_title:group.title,content:payload.slice(0,2000)})
@@ -1373,6 +1401,16 @@ async function executePlatformActionRequest (request) {
     eventLog({actorUserId:user.id,eventType:'root_agent_friend_broadcast',scope:{recipient_count:friendIds.length},payload:{},status:'done'})
     return `已将消息转发给 ${friendIds.length} 位当前好友。`
   }
+  if(request.action_type==='friend_message'){
+    const friendId=Number(payload.friend_id),friend=userOf(friendId)
+    if(!friendId||!friend||!friends(user.id,friendId))throw new Error('目标用户已不是你的好友，未发送消息')
+    const content=String(payload.content||'').trim().slice(0,2000)
+    if(!content)throw new Error('私聊消息内容不能为空')
+    const conversationId=privateConversationFor(user.id,friendId)
+    db.prepare("INSERT INTO messages (conversation_id,sender_id,sender_type,content,created_at) VALUES (?,?,'user',?,?)").run(conversationId,user.id,content,now())
+    eventLog({actorUserId:user.id,targetUserId:friendId,eventType:'root_agent_friend_message_sent',scope:{conversation_id:conversationId},payload:{message_length:content.length},status:'done'})
+    return `已向好友“${friend.name}”发送私聊消息。`
+  }
   if(request.action_type==='group_task'){
     const conversation=conversationOf(payload.conversation_id)
     if(!conversation||conversation.type!=='group'||!member(conversation.id,user.id))throw new Error('目标学习群已不存在或你已不在群内')
@@ -1431,7 +1469,10 @@ async function executePlatformActionRequest (request) {
     addDelegationMessage(delegationId,'requester',user.id,String(payload.question||''))
     eventLog({actorUserId:user.id,targetUserId:Number(payload.agent_owner_id),eventType:'root_agent_peer_delegation_created',scope:{course_id:Number(payload.course_id)},payload:{delegation_id:delegationId},status:'done'})
     if(policy.auto_respond)setTimeout(()=>resolveDelegation(delegationId).catch(error=>console.error('Root delegation resolve error:',error)),0)
-    return policy.auto_respond?'已发起同课程 Agent 自动协作，结果生成后会显示在“同课程 Agent 协作”。':'已发出同课程 Agent 协作申请，等待对方主人同意。'
+    return {
+      message:policy.auto_respond?`已创建同课程 Agent 协作 #${delegationId}，正在生成建议。`:`已创建同课程 Agent 协作 #${delegationId}，正在等待对方主人同意。`,
+      actions:[{type:'open_delegation',delegation_id:delegationId,label:'查看同课程 Agent 协作状态',description:policy.auto_respond?'协作完成后，这里会显示伙伴 Agent 回复与我的 Agent 整合建议。':'对方同意后，系统会自动继续协作；可在详情中查看进度或撤回。'}]
+    }
   }
   throw new Error('不支持的平台操作')
 }
@@ -2023,7 +2064,7 @@ app.post('/api/agent/platform-actions/:id/confirm',auth,async(req,res)=>{
   if(request.status==='processing')return res.status(409).json({error:'该操作正在处理中，请稍候刷新当前对话。',status:'processing'})
   if(request.status!=='pending')return res.status(409).json({error:`该操作当前状态为“${request.status}”，不能再次确认。`,status:request.status})
   if(request.expires_at&&Date.parse(request.expires_at)<Date.now()){db.prepare("UPDATE agent_platform_action_requests SET status='expired' WHERE id=? AND status='pending'").run(request.id);return res.status(410).json({error:'该操作确认已过期，请重新向我的 Agent 下达指令',status:'expired'})}
-  const permissionFields={group_post:'allow_group_post',friend_broadcast:'allow_friend_broadcast',group_task:'allow_group_task',peer_delegation:'allow_peer_delegation',project_plan:null,resource_organize:'allow_resource_manage',forum_publish:'allow_forum_publish'}
+  const permissionFields={group_post:'allow_group_post',friend_message:null,friend_broadcast:'allow_friend_broadcast',group_task:'allow_group_task',peer_delegation:'allow_peer_delegation',project_plan:null,resource_organize:'allow_resource_manage',forum_publish:'allow_forum_publish'}
   if(!Object.prototype.hasOwnProperty.call(permissionFields,request.action_type))return res.status(400).json({error:'该平台操作类型不受支持'})
   const permissionField=permissionFields[request.action_type]
   if(permissionField&&!platformPermissionsOf(req.user.id)[permissionField])return res.status(403).json({error:'该平台权限已关闭，请在“我的 Agent → 总 Agent 平台权限”中重新开启后再下达指令'})
@@ -2031,10 +2072,12 @@ app.post('/api/agent/platform-actions/:id/confirm',auth,async(req,res)=>{
   const claimed=db.prepare("UPDATE agent_platform_action_requests SET status='processing' WHERE id=? AND user_id=? AND status='pending'").run(request.id,req.user.id)
   if(!claimed.changes)return res.status(409).json({error:'该操作已被处理或正在处理中，请刷新当前对话。'})
   try {
-    const message=await executePlatformActionRequest(request)
+    const execution=await executePlatformActionRequest(request)
+    const message=typeof execution==='string'?execution:execution.message
+    const completionActions=typeof execution==='string'?[]:(execution.actions||[])
     db.prepare("UPDATE agent_platform_action_requests SET status='executed',executed_at=? WHERE id=?").run(now(),request.id)
     db.prepare("UPDATE agent_project_steps SET status='done',result_json=?,updated_at=? WHERE action_request_id=?").run(JSON.stringify({message,executed_at:now()}),now(),request.id)
-    if(request.thread_id)db.prepare("INSERT INTO agent_messages (thread_id,role,content,agent_type,attachments_json,actions_json) VALUES (?,?,?,'coordinator','[]','[]')").run(request.thread_id,'assistant',`**平台操作已完成**\n${message}`)
+    if(request.thread_id)db.prepare("INSERT INTO agent_messages (thread_id,role,content,agent_type,attachments_json,actions_json) VALUES (?,?,?,'coordinator','[]',?)").run(request.thread_id,'assistant',`**平台操作已完成**\n${message}`,JSON.stringify(completionActions))
     res.json({message,status:'executed'})
   } catch(error) {
     db.prepare("UPDATE agent_platform_action_requests SET status='failed',executed_at=? WHERE id=?").run(now(),request.id)
@@ -2143,7 +2186,7 @@ app.post('/api/agent/chat',auth,async(req,res)=>{
       console.error('Automatic agent export error:',error)
       answer+=`\n\n${error.code==='PDF_FONT_UNAVAILABLE'?'PDF 生成功能尚未配置中文字体，请联系管理员完成字体配置。':'文件生成失败，请稍后在回复下方重新尝试。'}`
     }
-    const externalActionRequested=groupMessageIntent(content)||forumPublishIntent(content)||peerAgentRequestIntent(content)||actionIntent.intent==='group_post'||actionIntent.intent==='forum_publish'
+    const externalActionRequested=friendMessageIntent(content)||groupMessageIntent(content)||forumPublishIntent(content)||peerAgentRequestIntent(content)||actionIntent.intent==='friend_message'||actionIntent.intent==='group_post'||actionIntent.intent==='forum_publish'
     if(platformActions.length) {
       answer=`我已根据你的明确指令准备好以下待确认操作：${platformActions.map(action=>`“${action.label}”`).join('、')}。\n\n请核对下方操作卡后点击一次确认；在确认前，系统不会发送消息、发布帖子、创建任务或联系其他用户的 Agent。`
     } else if(mode==='action'&&externalActionRequested) {
