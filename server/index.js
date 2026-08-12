@@ -1116,8 +1116,12 @@ function collaborationPolicyOf (userId, courseId) {
 }
 function publicCollaborationPolicy (policy) { return { course_id:Number(policy.course_id||0),allow_matching:!!policy.allow_matching,auto_respond:!!policy.auto_respond,share_mastery:!!policy.share_mastery,share_resource_titles:!!policy.share_resource_titles,updated_at:policy.updated_at||'' } }
 function requesterCollaborationSummary (userId, courseId) {
-  const state=getLearningState({db,userId,courseId,limit:3})
-  return { weak_points:(state.points||[]).slice(0,3).map(item=>({name:item.name,mastery:Math.round(Number(item.mastery||0)*100)})), pending_plans:db.prepare("SELECT COUNT(*) count FROM study_plans WHERE user_id=? AND status!='done'").get(userId).count }
+  const state=getLearningState({db,userId,courseId,limit:12})
+  const weakPoints=[...(state.points||[])]
+    .sort((left,right)=>Number(left.mastery||0)-Number(right.mastery||0))
+    .slice(0,5)
+    .map(item=>({name:item.name,mastery:Math.round(Number(item.mastery||0)*100)}))
+  return { weak_points:weakPoints, pending_plans:db.prepare("SELECT COUNT(*) count FROM study_plans WHERE user_id=? AND status!='done'").get(userId).count }
 }
 function peerSharePacket (owner, courseId, policy) {
   const course=db.prepare('SELECT id,name FROM courses WHERE id=?').get(courseId)
@@ -1223,6 +1227,15 @@ function friendMessageIntent (content='') {
   const text=String(content||'')
   return /(?:给|向|对)\s*[^\s，。！？、:：]{2,48}\s*(?:发送|发消息|转发|通知|告诉|说|发)(?:消息|内容|通知)?|(?:发送|发消息|转发|通知|告诉|说|发)(?:消息|内容|通知)?\s*(?:给|向|到)\s*[^\s，。！？、:：]{2,48}/i.test(text)
 }
+function friendMessageNeedsDraft (content='') {
+  const text=String(content||'')
+  return /(?:自己.{0,8}(?:编辑|组织|写)|帮我.{0,10}(?:编辑|组织|润色|起草|拟|写)|(?:组织|润色|起草|拟).{0,10}(?:语言|消息|问候)|重新.{0,12}(?:发送|发消息)|(?:替我|代我).{0,12}(?:问好|问候|打招呼)|(?:问好|问候|打招呼).{0,12}(?:编辑|组织|写))/i.test(text)
+}
+function usableMessageContent (value='') {
+  const text=String(value||'').trim()
+  if(!text||text.length<2)return false
+  return !/^(?:消息|内容|通知|问好|问候|一条消息|发消息|发送消息)$/i.test(text)
+}
 function friendMessagePayload (content='', friend) {
   const text=String(content||'').trim()
   const quoted=text.match(/[“\"]([^”\"]{1,1600})[”\"]/)?.[1]
@@ -1233,6 +1246,42 @@ function friendMessagePayload (content='', friend) {
   const beforeName=new RegExp(`(?:发送|发消息|转发|通知|告诉|说|发)(?:消息|内容|通知)?\\s*(?:给|向|到)\\s*${escaped}\\s*(?:是|为|：|:|，|,)?\\s*([\\s\\S]{1,1600})$`,'i')
   const payload=text.match(afterName)?.[1]||text.match(beforeName)?.[1]||''
   return String(payload).trim().replace(/^(?:一条|个|一下)\s*/,'')
+}
+function fallbackFriendMessageDraft (friend, source='') {
+  const topic=String(source||'').includes('数据结构')?'最近在复习数据结构，想和你交流一下学习进度。':''
+  return `你好呀，${friend?.name||'同学'}！${topic||'想向你问个好，也希望你最近学习顺利。'}有空时我们可以一起交流学习心得。`
+}
+async function draftFriendMessage (user, friend, source='') {
+  const fallback=fallbackFriendMessageDraft(friend,source)
+  if(!user?.api_key)return fallback
+  try {
+    const prompt=`你是 CampusMind 的私聊文案助手。根据用户意图，为收件人写一条自然、礼貌、简洁的中文私聊消息。只输出最终要发送的消息正文，不要解释、不加标题、不声称已发送。不要编造双方经历或敏感信息。收件人：${friend.name}。`
+    const raw=await callExternalAgent(user,prompt,[{role:'user',content:`用户意图：${String(source||'').slice(0,1000)}`}],user)
+    const text=String(raw||'').replace(/^```[\s\S]*?\n?/,'').replace(/```$/,'').trim().slice(0,2000)
+    return usableMessageContent(text)?text:fallback
+  } catch { return fallback }
+}
+function collaborationCandidateForNamedFriend (requesterId, courseId, content='') {
+  const mentioned=friendsMentionedInCommand(requesterId,content)
+  if(mentioned.length!==1)return {friend:null,candidate:null}
+  const friend=mentioned[0]
+  const candidate=collaborationCandidates(requesterId,courseId).find(item=>Number(item.owner_id)===Number(friend.id))||null
+  return {friend,candidate}
+}
+function peerDelegationFallbackQuestion (course, summary, source='') {
+  const weak=(summary.weak_points||[]).map(item=>`${item.name}（掌握度约 ${item.mastery}%）`).join('、')
+  const focus=weak||'当前尚未形成明确的知识点掌握度记录'
+  return `我正在学习《${course.name}》，希望咨询更有针对性的复习方法。我的薄弱知识点是：${focus}。请按优先级给出学习路径、每个知识点的练习方式、常见误区，以及一份可在 3 天内执行的复习安排。补充需求：${String(source||'').slice(0,300)}`.slice(0,1200)
+}
+async function draftPeerDelegationQuestion (user, course, friend, summary, source='') {
+  const fallback=peerDelegationFallbackQuestion(course,summary,source)
+  if(!user?.api_key)return fallback
+  try {
+    const prompt=`你是 CampusMind 的学习协作任务编辑器。请把用户的协作意图和学习画像整理成一段发给同课程伙伴 Agent 的咨询问题。只输出最终问题，不解释。问题必须明确列出用户的薄弱知识点、希望得到的建议和可执行的输出，不得要求对方泄露私人信息。课程：${course.name}；目标伙伴：${friend?.name||'同课程学习伙伴'}；学习摘要：${JSON.stringify(summary)}。`
+    const raw=await callExternalAgent(user,prompt,[{role:'user',content:`用户原始意图：${String(source||'').slice(0,1200)}`}],user)
+    const text=String(raw||'').replace(/^```[\s\S]*?\n?/,'').replace(/```$/,'').trim().slice(0,1200)
+    return text.length>=12?text:fallback
+  } catch { return fallback }
 }
 function groupMessageIntent (content='') {
   const text=String(content||'')
@@ -1286,13 +1335,16 @@ async function proposePlatformActions (user, content, actionIntent={}) {
   const permissions=platformPermissionsOf(user.id),text=String(content||'').trim(),actions=[]
   const semanticGroup=actionIntent.group_target?exactGroupInCommand(user.id,`向${actionIntent.group_target}${/(?:群|小组|讨论组)$/.test(actionIntent.group_target)?'':'群'}发消息`):null
   const group=exactGroupInCommand(user.id,text)||semanticGroup
-  const add=(type,label,description,payload)=>actions.push({type,label,description,payload})
+  const add=(type,label,description,payload,options={})=>actions.push({type,label,description,payload,...options})
   // 一对一私聊只在用户自己的好友列表中精确匹配，绝不在全站用户中按名称猜测。
   const matchedFriends=friendsMentionedInCommand(user.id,text)
   const directFriend=matchedFriends.length===1?matchedFriends[0]:null
   if(directFriend&&friendMessageIntent(text)) {
-    const payload=friendMessagePayload(text,directFriend)||((actionIntent.intent==='friend_message'&&actionIntent.message)?actionIntent.message:'')
-    if(payload&&payload!==text)add('friend_message',`确认发送给好友“${directFriend.name}”`,`将以你的身份发送私聊消息：${payload.slice(0,120)}`,{friend_id:directFriend.id,friend_name:directFriend.name,content:payload.slice(0,2000)})
+    const needsDraft=friendMessageNeedsDraft(text)
+    const extracted=needsDraft?'':friendMessagePayload(text,directFriend)
+    const semantic=needsDraft?'':actionIntent.intent==='friend_message'?actionIntent.message:''
+    const contentDraft=usableMessageContent(extracted)?extracted:(usableMessageContent(semantic)?semantic:await draftFriendMessage(user,directFriend,text))
+    if(usableMessageContent(contentDraft))add('friend_message',`确认发送给好友“${directFriend.name}”`,`将以你的身份发送私聊消息。确认前你可以直接修改下方的发送内容。`,{friend_id:directFriend.id,friend_name:directFriend.name,content:contentDraft.slice(0,2000),draft_source:needsDraft?'agent':'user'}, {editable_content:true})
   }
   if(group&&permissions.allow_group_post&&(groupMessageIntent(text)||actionIntent.intent==='group_post')){
     const payload=actionIntent.intent==='group_post'&&actionIntent.message?actionIntent.message:commandPayload(text,['发送','发消息','转发','通知','告诉','说','发'])
@@ -1314,8 +1366,17 @@ async function proposePlatformActions (user, content, actionIntent={}) {
   if(permissions.allow_peer_delegation&&peerAgentRequestIntent(text)){
     const course=matchingCourseForPeerRequest(user.id,text)
     if(course){
-      const candidate=collaborationCandidates(user.id,course.id)[0]
-      if(candidate)add('peer_delegation',`确认委托 ${candidate.agent_name}`,`向一位已开启“${course.name}”协作授权的 Agent 发起请求；对方可拒绝或撤回。`,{course_id:course.id,course_name:course.name,agent_owner_id:candidate.owner_id,agent_name:candidate.agent_name,question:text.slice(0,1200)})
+      const named=collaborationCandidateForNamedFriend(user.id,course.id,text)
+      const candidate=named.candidate||(!named.friend?collaborationCandidates(user.id,course.id)[0]:null)
+      if(candidate){
+        const summary=requesterCollaborationSummary(user.id,course.id)
+        const question=await draftPeerDelegationQuestion(user,course,named.friend,summary,text)
+        const targetLabel=named.friend?`${named.friend.name} 的 Agent`:(candidate.agent_name||'同课程学习伙伴 Agent')
+        const description=named.friend?`将精确咨询好友“${named.friend.name}”的 Agent，并携带你的《${course.name}》薄弱知识点摘要。对方仍可拒绝或撤回。`:`向一位已开启“${course.name}”协作授权的 Agent 发起请求；对方可拒绝或撤回。`
+        add('peer_delegation',`确认咨询 ${targetLabel}`,description,{course_id:course.id,course_name:course.name,agent_owner_id:candidate.owner_id,agent_name:candidate.agent_name,target_friend_name:named.friend?.name||'',question,requester_summary:summary})
+      } else if(named.friend) {
+        add('open_peer_collaboration',`查看 ${named.friend.name} 的 Agent 协作设置`,`好友“${named.friend.name}”目前没有开启《${course.name}》的 Agent 协作授权，因此不会向其他人发送请求。可请对方在“我的 Agent → 同课程 Agent 协作”中开启该课程授权。`,{friend_name:named.friend.name,course_name:course.name})
+      }
     }
   }
   return actions
@@ -2068,11 +2129,20 @@ app.post('/api/agent/platform-actions/:id/confirm',auth,async(req,res)=>{
   if(!Object.prototype.hasOwnProperty.call(permissionFields,request.action_type))return res.status(400).json({error:'该平台操作类型不受支持'})
   const permissionField=permissionFields[request.action_type]
   if(permissionField&&!platformPermissionsOf(req.user.id)[permissionField])return res.status(403).json({error:'该平台权限已关闭，请在“我的 Agent → 总 Agent 平台权限”中重新开启后再下达指令'})
+  // 用户只能在确认前修改“将要发送的正文”；收件人、群聊、委托对象等关键范围始终以服务端已生成的操作卡为准。
+  let requestForExecution=request
+  if(['friend_message','group_post','friend_broadcast'].includes(request.action_type)&&req.body?.content_override!==undefined){
+    const content=String(req.body.content_override||'').trim().slice(0,2000)
+    if(!content)return res.status(400).json({error:'发送内容不能为空；请填写正文或取消本次操作'})
+    const payload={...safeJson(request.payload_json,{}),content}
+    db.prepare('UPDATE agent_platform_action_requests SET payload_json=? WHERE id=? AND user_id=? AND status=?').run(JSON.stringify(payload),request.id,req.user.id,'pending')
+    requestForExecution={...request,payload_json:JSON.stringify(payload)}
+  }
   // 先原子地把 pending 领用为 processing。即使用户快速点击两次，也只会有一个请求真正执行。
   const claimed=db.prepare("UPDATE agent_platform_action_requests SET status='processing' WHERE id=? AND user_id=? AND status='pending'").run(request.id,req.user.id)
   if(!claimed.changes)return res.status(409).json({error:'该操作已被处理或正在处理中，请刷新当前对话。'})
   try {
-    const execution=await executePlatformActionRequest(request)
+    const execution=await executePlatformActionRequest(requestForExecution)
     const message=typeof execution==='string'?execution:execution.message
     const completionActions=typeof execution==='string'?[]:(execution.actions||[])
     db.prepare("UPDATE agent_platform_action_requests SET status='executed',executed_at=? WHERE id=?").run(now(),request.id)
