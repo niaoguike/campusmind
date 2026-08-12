@@ -633,6 +633,9 @@ if (!db.prepare("SELECT 1 FROM announcements WHERE title='聊天 Agent 文档生
 if (!db.prepare("SELECT 1 FROM announcements WHERE title='总 Agent 项目中心与资料库管家已上线' LIMIT 1").get()) {
   db.prepare('INSERT INTO announcements (title,content,is_pinned,author_id,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('总 Agent 项目中心与资料库管家已上线','“我的 Agent”现可把较大的学习目标建立为可追踪项目，并拆分为学习计划、资料库整理、论坛经验收集和同课程 Agent 协作四步。资料整理只会处理本人未归档文件；论坛内容会先保存为草稿；学习计划、移动资料、公开发帖和跨用户协作均须由本人逐项确认后才会执行。',1,null,now(),now())
 }
+if (!db.prepare("SELECT 1 FROM announcements WHERE title='我的 Agent 双工作模式已上线' LIMIT 1").get()) {
+  db.prepare('INSERT INTO announcements (title,content,is_pinned,author_id,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('我的 Agent 双工作模式已上线','“我的 Agent”右上角现可切换“学习问答”和“行动工作台”。学习问答专注课程解释、资料检索、复盘与成果生成，不会创建平台操作；行动工作台整合任务拆解、资料整理、论坛草稿、群消息与跨 Agent 协作。所有发送、移动、公开发布和联系他人的操作仍需本人确认并保留审计记录。',1,null,now(),now())
+}
 db.prepare("UPDATE resources SET file_path=REPLACE(file_path,'/uploads/resources/','/api/resources/files/') WHERE file_path LIKE '/uploads/resources/%'").run()
 for (const row of db.prepare("SELECT id,file_name FROM resources WHERE file_name!=''").all()) { const fixed=readableUploadName(row.file_name); if(fixed!==row.file_name) db.prepare('UPDATE resources SET file_name=? WHERE id=?').run(fixed,row.id) }
 
@@ -1678,7 +1681,7 @@ app.post('/api/learning/quizzes/:id/submit',auth,async(req,res)=>{
 function supervisorActionsFor (user, content='') {
   const text=String(content||'')
   const actions=[]
-  if(/(?:帮我|请|我要|我想).{0,18}(?:完成|推进|制定|规划|准备|冲刺|安排|带我完成).{0,120}(?:学习|复习|考试|课程|项目|任务)|(?:学习|复习|考试|课程|项目|任务).{0,80}(?:计划|规划|路线|怎么完成)/.test(text)){
+  if(/(?:帮我|请|我要|我想).{0,18}(?:完成|推进|制定|规划|准备|冲刺|安排|带我完成).{0,120}(?:学习|复习|考试|课程|项目|任务)|(?:学习|复习|考试|课程|项目|任务).{0,80}(?:计划|规划|路线|怎么完成)|(?:帮我|请).{0,20}(?:整理|管理|归档|盘点).{0,36}(?:资料|资料库)|(?:帮我|请).{0,20}(?:收集|咨询|了解).{0,45}(?:论坛|同学|其他 Agent|学习经验)/i.test(text)){
     actions.push({type:'create_project',label:'交给总 Agent 建立项目并拆解',description:'总 Agent 会将目标拆成学习计划、个人资料整理、论坛经验收集和同课程 Agent 协作四个可追踪步骤；涉及外部操作时仍需你确认。',goal:text.slice(0,1000)})
   }
   if(/(群聊|学习群|小组|同组).{0,20}(协作|讨论|交流|辩论)|让.{0,12}@?.{0,20}(讨论|辩论)/.test(text)){
@@ -1987,7 +1990,7 @@ app.get('/api/agent/runs/:id',auth,(req,res)=>{
   res.json({...run,steps})
 })
 app.post('/api/agent/chat',auth,async(req,res)=>{
-  const content=(req.body.content||'').trim(),exportMode=requestedExportMode(content)
+  const content=(req.body.content||'').trim(),exportMode=requestedExportMode(content),mode=req.body.mode==='action'?'action':'study'
   let threadId=Number(req.body.thread_id||0)
   const attachmentIds=[...new Set((Array.isArray(req.body.attachment_ids)?req.body.attachment_ids:[]).map(Number).filter(Boolean))]
   if((!content&&!attachmentIds.length)||content.length>4000)return res.status(400).json({error:'请输入学习问题或添加一个附件'})
@@ -2003,12 +2006,14 @@ app.post('/api/agent/chat',auth,async(req,res)=>{
   const publicAttachments=attachments.map(publicAgentAttachment)
   db.prepare('INSERT INTO agent_messages (thread_id,role,content,attachments_json) VALUES (?,?,?,?)').run(threadId,'user',content||'请阅读我上传的附件。',JSON.stringify(publicAttachments))
 
-  const platformActions=createPlatformActionRequests(user.id,threadId,proposePlatformActions(user,content))
+  const platformActions=mode==='action'?createPlatformActionRequests(user.id,threadId,proposePlatformActions(user,content)):[]
   const history=buildThreadHistory({db,threadId,userId:user.id,attachmentContext})
   const memoryBrief=accessibleMemoryBrief(user.id,content)
   if(memoryBrief) history.unshift({role:'system',content:memoryBrief})
-  const supervisorActions=[...platformActions,...supervisorActionsFor(user,content)]
-  if(supervisorActions.length) history.unshift({role:'system',content:'你是用户的总学习协调 Agent。用户的请求可能需要平台操作、群协作或跨用户 Agent 委托。涉及发消息、建任务或联系其他用户 Agent 时，系统会生成用户可见的确认入口；必须等用户点击确认后才能执行。请说明操作范围、授权边界与下一步。'})
+  const supervisorActions=mode==='action'?[...platformActions,...supervisorActionsFor(user,content)]:[]
+  history.unshift({role:'system',content:mode==='action'
+    ?'当前处于“行动工作台”。你是用户的 CampusMind 总行动 Agent，可拆解复杂目标并协调学习计划、本人资料库、校园论坛、学习群和获授权的其他 Agent。只能使用系统生成的结构化操作入口，不得声称已经执行尚未确认的动作；发送消息、移动资料、公开发帖或联系其他用户 Agent 必须等用户点击确认。你没有服务器 Shell、任意数据库写入或部署权限。'
+    :'当前处于“学习问答”。只提供课程解释、课程资料检索、练习辅导、学习建议、复盘和学习成果生成。不得创建或建议执行群发消息、论坛发布、资料移动、跨用户 Agent 委托或其他平台写操作；如果用户要求执行平台动作，请说明需要切换到“行动工作台”。'})
   const orchestration=createPersonalLearningRun(user,content)
   let trace=null
   try {

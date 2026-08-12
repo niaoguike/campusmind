@@ -1,25 +1,28 @@
 <template>
   <div class="page">
     <AppNav />
-    <main class="workspace">
+    <main :class="['workspace', { 'action-mode': agentMode === 'action' }]">
       <aside class="panel sidebar">
         <button class="primary new-thread" @click="newThread">＋ 新建学习对话</button>
         <p class="label">我的专属 Agent</p>
         <div class="agent-card"><span class="agent-photo"><AvatarBadge :value="myProfile.agent_avatar || '✦'" :alt="myProfile.agent_name || '我的 Agent'" /></span><div><b>{{ myProfile.agent_name || '知行' }}</b><small>学习教练 · LangChain</small></div></div>
-        <p class="hint">可以检索课程资料、规划学习、梳理错题，也能把回答生成学习成果文件。</p>
-        <button class="collaboration-entry project-entry" type="button" @click="openProjectCenter()">◈ 总 Agent 任务中心 <em v-if="activeProjectCount">{{ activeProjectCount }}</em></button>
-        <button class="collaboration-entry" type="button" @click="openCollaboration">✦ 同课程 Agent 协作 <em v-if="pendingIncomingDelegations.length">{{ pendingIncomingDelegations.length }}</em></button>
-        <button class="collaboration-entry memory-entry" type="button" @click="openMemoryDialog">▣ 群学习成果记忆 <em v-if="pendingMemoryCount">{{ pendingMemoryCount }}</em></button>
-        <button class="collaboration-entry permission-entry" type="button" @click="openPermissionDialog">⚙ 总 Agent 平台权限</button>
+        <p class="hint">{{ agentMode === 'study' ? '专注课程问答、资料检索、学习规划与成果生成。' : '拆解复杂目标并调用平台能力；所有对外操作仍由你最终确认。' }}</p>
+        <template v-if="agentMode === 'action'">
+          <p class="label capability-label">行动能力</p>
+          <button class="collaboration-entry" type="button" @click="openCollaboration">✦ 同课程 Agent 协作 <em v-if="pendingIncomingDelegations.length">{{ pendingIncomingDelegations.length }}</em></button>
+          <button class="collaboration-entry memory-entry" type="button" @click="openMemoryDialog">▣ 群学习成果记忆 <em v-if="pendingMemoryCount">{{ pendingMemoryCount }}</em></button>
+          <button class="collaboration-entry permission-entry" type="button" @click="openPermissionDialog">⚙ 行动权限与确认</button>
+        </template>
         <p class="label">近期对话</p>
         <div class="thread-list"><button v-for="thread in threads" :key="thread.id" :class="['thread', { active: thread.id === threadId }]" :title="threadPreview(thread)" @click="openThread(thread.id)">{{ threadPreview(thread) }}</button></div>
       </aside>
       <section class="panel chat">
-        <header><div><span>PRIVATE LEARNING AGENT</span><h1>和你的学习伙伴一起进步</h1></div><div class="model-actions"><em>● 已连接 DeepSeek</em><button type="button" class="artifact-compact" @click="openArtifactStudio">✨ 专业生成成果</button></div></header>
-        <div class="shortcuts"><button @click="ask('帮我根据本周课表安排一个学习计划')">安排本周计划</button><button @click="ask('帮我找数据结构相关的复习资料')">检索课程资料</button><button @click="ask('请根据我的学习状态生成本周复盘')">生成本周复盘</button><button @click="ask('请记住：我每天晚上 8 点后适合学习')">记录学习偏好</button></div>
+        <header><div><span>{{ agentMode === 'study' ? 'LEARNING Q&A' : 'ACTION WORKSPACE' }}</span><h1>{{ agentMode === 'study' ? '专注问答与学习' : '让总 Agent 带你完成任务' }}</h1></div><div class="model-actions"><div class="mode-switch" role="tablist" aria-label="Agent 工作模式"><button type="button" :class="{ active: agentMode === 'study' }" @click="setAgentMode('study')">学习问答</button><button type="button" :class="{ active: agentMode === 'action' }" @click="setAgentMode('action')">行动工作台</button></div><em>● 已连接 DeepSeek</em><button type="button" class="artifact-compact" @click="openArtifactStudio">✨ 专业生成成果</button></div></header>
+        <div v-if="agentMode === 'study'" class="shortcuts"><button @click="ask('帮我根据本周课表安排一个学习计划')">安排本周计划</button><button @click="ask('帮我找数据结构相关的复习资料')">检索课程资料</button><button @click="ask('请根据我的学习状态生成本周复盘')">生成本周复盘</button><button @click="ask('请记住：我每天晚上 8 点后适合学习')">记录学习偏好</button></div>
+        <div v-else class="shortcuts action-shortcuts"><button @click="focusProjectGoal('帮我完成一个完整学习目标，并拆解为可执行步骤')">规划复杂任务</button><button @click="focusProjectGoal('帮我检查并整理我上传但尚未归档的课程资料')">整理个人资料</button><button @click="ask('帮我找同课程的其他 Agent 咨询学习经验')">调用同课程 Agent</button><button @click="openPermissionDialog">配置行动权限</button></div>
         <div v-if="showExportTip" class="export-tip"><span>得到回答后，直接点击回答下方的 <b>PPT / Word / PDF / 图片</b> 按钮即可下载；也可以直接说“生成 PPT”。</span><button type="button" aria-label="关闭提示" title="关闭本次提示" @click="showExportTip = false">×</button></div>
         <div ref="scrollBox" class="messages">
-          <div v-if="!messages.length" class="empty"><strong>✦ 今天想从哪里开始？</strong><p>可以问概念、检索课程资料、梳理错题，或让知行生成学习计划。</p></div>
+          <div v-if="!messages.length" class="empty"><strong>{{ agentMode === 'study' ? '✦ 今天想学习什么？' : '◈ 今天要完成什么任务？' }}</strong><p>{{ agentMode === 'study' ? '可以问概念、检索课程资料、梳理错题，或生成学习成果。' : '说明目标与期限，总 Agent 会拆解步骤，并在你确认后调用平台能力。' }}</p></div>
           <article v-for="(message, index) in messages" :key="index" :class="['bubble', message.role]">
             <b>{{ message.role === 'user' ? '我' : agentLabel(message.agent_type) }}</b>
             <div v-if="message.role === 'assistant'" class="learning-markdown" v-html="renderLearningMarkdown(message.content)"></div>
@@ -32,8 +35,8 @@
               </button>
             </div>
             <div v-if="message.attachments?.length" class="attachments"><button v-for="file in message.attachments.filter(file => !isImageAttachment(file))" :key="file.id" @click="downloadAttachment(file)">📎 {{ file.file_name }}</button></div>
-            <div v-if="message.role === 'assistant' && message.actions?.length" class="supervisor-actions">
-              <span>总 Agent 建议的下一步</span>
+            <div v-if="agentMode === 'action' && message.role === 'assistant' && message.actions?.length" class="supervisor-actions">
+              <span>行动工作台待确认</span>
               <button v-for="action in message.actions" :key="action.request_id || action.type" type="button" :disabled="action.status && action.status !== 'pending'" @click="handleSupervisorAction(action)">{{ action.status === 'executed' ? '✓ 已执行' : action.status === 'cancelled' ? '已取消' : action.label }}</button>
               <small v-for="action in message.actions" :key="`${action.request_id || action.type}-description`">{{ action.description }}</small>
             </div>
@@ -41,15 +44,35 @@
             <div v-if="message.role === 'assistant' && message.agent_run_id && openRunId === message.agent_run_id && runTraces[message.agent_run_id]" class="trace-box"><div v-for="step in runTraces[message.agent_run_id].steps" :key="step.id" :class="['trace-step', step.status]"><span>{{ step.status === 'done' ? '✓' : step.status === 'failed' ? '!' : '·' }}</span><div><b>{{ step.label }}</b><small>{{ step.output_summary || step.meta?.description }}</small><em v-if="step.citations?.length">引用 {{ step.citations.length }} 条课程资料</em></div></div></div>
             <div v-if="message.role === 'assistant'" class="exports"><button :disabled="outputLoading" @click="generateOutput('ppt')">生成 PPT</button><button :disabled="outputLoading" @click="generateOutput('word')">导出 Word</button><button :disabled="outputLoading" @click="generateOutput('pdf')">导出 PDF</button><button :disabled="outputLoading" @click="generateOutput('image')">生成学习图解</button><button :disabled="outputLoading" @click="generateOutput('file')">学习笔记</button></div>
           </article>
-          <article v-if="loading" class="bubble assistant"><b>协调器</b><p>正在选择合适的学习 Agent 并调用工具…</p></article>
+          <article v-if="loading" class="bubble assistant"><b>{{ agentMode === 'study' ? '学习协调器' : '行动协调器' }}</b><p>{{ agentMode === 'study' ? '正在选择合适的学习 Agent 并检索所需信息…' : '正在分析目标、权限与可执行步骤…' }}</p></article>
         </div>
         <form @submit.prevent="send">
           <input ref="attachmentInput" class="hidden" type="file" accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.csv,.txt,.md,.png,.jpg,.jpeg,.webp" @change="chooseAttachment">
           <div v-if="pendingAttachments.length" class="pending"><span v-for="file in pendingAttachments" :key="file.id">📎 {{ file.file_name }} <button type="button" @click="removeAttachment(file.id)">×</button></span></div>
-          <textarea v-model="input" :disabled="loading" placeholder="输入你的学习问题，Enter 发送，Shift + Enter 换行" @keydown.enter.exact.prevent="send" />
+          <textarea v-model="input" :disabled="loading" :placeholder="agentMode === 'study' ? '输入学习问题，Enter 发送，Shift + Enter 换行' : '说明要完成的任务、目标对象和限制条件'" @keydown.enter.exact.prevent="send" />
           <div class="composer"><small>主动发送的附件正文会交由你配置的模型分析</small><span><button class="attach" type="button" :disabled="loading || uploading" @click="attachmentInput?.click()">{{ uploading ? '上传中…' : '📎 附件' }}</button><button class="primary" :disabled="loading || (!input.trim() && !pendingAttachments.length)">{{ loading ? '思考中…' : '发送 ↗' }}</button></span></div>
         </form>
       </section>
+      <aside v-if="agentMode === 'action'" class="panel action-console">
+        <header><div><span>ACTION PROJECTS</span><h2>任务与执行</h2></div><em v-if="activeProjectCount">{{ activeProjectCount }} 个进行中</em></header>
+        <p class="action-note">行动工作台可以管理你在 CampusMind 内的学习事务。发消息、移动资料、公开发帖和联系他人 Agent 前都会显示确认。</p>
+        <form class="project-create action-project-create" @submit.prevent="createProjectFromGoal()">
+          <textarea ref="projectGoalInput" v-model="projectGoal" maxlength="1000" placeholder="输入一个完整目标，例如：两周内完成数据结构期末复习，并整理资料和咨询高分同学的 Agent。"></textarea>
+          <button class="primary" :disabled="projectLoading || projectGoal.trim().length < 6">{{ projectLoading ? '拆解中…' : '建立任务' }}</button>
+        </form>
+        <div v-if="!projects.length" class="action-empty">还没有行动任务。你也可以直接在聊天框描述目标。</div>
+        <template v-else>
+          <select v-model.number="selectedProjectId" class="project-select" aria-label="选择行动项目"><option v-for="project in projects" :key="project.id" :value="project.id">{{ project.status === 'completed' ? '✓ ' : '' }}{{ project.title }}（{{ project.progress.done }}/{{ project.progress.total }}）</option></select>
+          <section v-if="selectedProject" class="action-project-detail">
+            <div class="action-project-head"><div><b>{{ selectedProject.title }}</b><small>{{ selectedProject.goal }}</small></div><button type="button" class="text-button" @click="deleteProject(selectedProject)">删除</button></div>
+            <article v-for="step in selectedProject.steps" :key="step.id" :class="['action-step', step.status]">
+              <span>{{ step.status === 'done' ? '✓' : step.step_order }}</span><div><b>{{ step.title }}</b><small>{{ step.result?.message || step.description }}</small><details v-if="step.draft"><summary>预览论坛草稿</summary><p>{{ step.draft.content }}</p></details></div>
+              <button v-if="['pending','prepared'].includes(step.status)" type="button" class="soft-button" :disabled="projectActionLoading" @click="prepareProjectStep(selectedProject, step)">准备</button><button v-else-if="step.status === 'awaiting_confirmation' && step.action?.status === 'pending'" type="button" class="primary tiny-primary" :disabled="projectActionLoading" @click="confirmProjectStep(step)">确认</button><em v-else>{{ projectStepStatus(step.status) }}</em>
+            </article>
+            <div class="action-project-footer"><button v-if="selectedProject.status !== 'completed'" type="button" class="soft-button" @click="setProjectStatus(selectedProject, 'completed')">标记项目完成</button><button v-else type="button" class="soft-button" @click="setProjectStatus(selectedProject, 'active')">重新开启</button></div>
+          </section>
+        </template>
+      </aside>
     </main>
     <el-dialog v-model="collaborationDialog" title="同课程 Agent 协作" width="min(680px, 94vw)">
       <div class="collaboration-panel">
@@ -118,33 +141,7 @@
         </article>
       </div>
     </el-dialog>
-    <el-dialog v-model="projectDialog" title="总 Agent 任务中心" width="min(960px, 96vw)" top="5vh">
-      <div class="project-panel">
-        <p>把一个较大的目标交给总 Agent：它会建立可追踪的学习项目，并把真正会影响平台数据或联系他人的动作留给你逐项确认。</p>
-        <form class="project-create" @submit.prevent="createProjectFromGoal()">
-          <textarea v-model="projectGoal" maxlength="1000" placeholder="例如：帮我在两周内完成数据结构期末复习，整理资料，了解高分同学的复习方法，并形成可执行计划。"></textarea>
-          <button class="primary" :disabled="projectLoading || projectGoal.trim().length < 6">{{ projectLoading ? '正在拆解…' : '建立并拆解项目' }}</button>
-        </form>
-        <div v-if="!projects.length" class="memory-empty">还没有项目。输入一个想完成的学习目标，让总 Agent 从这里开始带你推进。</div>
-        <div v-else class="project-list">
-          <article v-for="project in projects" :key="project.id" :class="['project-card', { selected: project.id === selectedProjectId }]" @click="selectedProjectId = project.id">
-            <div class="project-card-head"><span>{{ project.status === 'completed' ? '已完成' : project.status === 'paused' ? '已暂停' : '进行中' }}</span><small>{{ project.progress.done }}/{{ project.progress.total }} 步完成</small></div>
-            <b>{{ project.title }}</b><small>{{ project.goal }}</small>
-          </article>
-        </div>
-        <section v-if="selectedProject" class="project-detail">
-          <header><div><span>ROOT AGENT PROJECT</span><h3>{{ selectedProject.title }}</h3><small>{{ selectedProject.summary }}</small></div><aside><button v-if="selectedProject.status !== 'completed'" type="button" class="soft-button" @click="setProjectStatus(selectedProject, 'completed')">标记完成</button><button v-else type="button" class="soft-button" @click="setProjectStatus(selectedProject, 'active')">重新开启</button><button type="button" class="text-button" @click="deleteProject(selectedProject)">删除项目</button></aside></header>
-          <article v-for="step in selectedProject.steps" :key="step.id" :class="['project-step', step.status]">
-            <div class="step-index">{{ step.step_order }}</div>
-            <div class="step-main"><b>{{ step.title }}</b><small>{{ step.description }}</small><p v-if="step.result?.message">{{ step.result.message }}</p><p v-if="step.action_type === 'resource_organize' && step.result?.proposal">待整理 {{ step.result.proposal.unfiled_count }} 份未归档资料，检测到 {{ step.result.proposal.duplicates?.length || 0 }} 组同名文件。</p>
-              <details v-if="step.draft" class="forum-draft"><summary>查看论坛草稿：{{ step.draft.title }}</summary><h4>{{ step.draft.title }}</h4><p>{{ step.draft.content }}</p><small v-if="step.draft.poll_question">投票：{{ step.draft.poll_question }}（{{ step.draft.poll_options.join(' / ') }}）</small></details>
-            </div>
-            <aside class="step-actions"><span>{{ projectStepStatus(step.status) }}</span><button v-if="['pending','prepared'].includes(step.status)" type="button" class="soft-button" :disabled="projectActionLoading" @click="prepareProjectStep(selectedProject, step)">{{ step.status === 'prepared' && step.action_type === 'forum_draft' ? '准备发布确认' : '准备此步骤' }}</button><button v-if="step.status === 'awaiting_confirmation' && step.action?.status === 'pending'" type="button" class="primary small-primary" :disabled="projectActionLoading" @click="confirmProjectStep(step)">确认执行</button></aside>
-          </article>
-        </section>
-      </div>
-    </el-dialog>
-    <el-dialog v-model="permissionDialog" title="我的 Agent 平台权限" width="min(620px, 94vw)">
+    <el-dialog v-model="permissionDialog" title="行动工作台权限" width="min(620px, 94vw)">
       <div class="permission-panel">
         <p>这些权限只允许 Agent 为你准备操作，并且每一次真正的发送、转发、建任务或跨用户协作都仍需要你在对话内点击确认。系统会记录执行时间与范围。</p>
         <label class="permission-row"><span><b>准备群消息</b><small>识别你明确点名的学习群，并准备一条以你身份发送的消息。</small></span><el-switch v-model="platformPermissions.allow_group_post" /></label>
@@ -182,12 +179,13 @@ import { renderLearningMarkdown } from '../utils/learningMarkdown'
 
 const router = useRouter()
 const threads = ref([]), threadId = ref(null), messages = ref([]), input = ref(''), loading = ref(false), outputLoading = ref(false), uploading = ref(false), pendingAttachments = ref([]), attachmentInput = ref(null), scrollBox = ref(null), myProfile = ref({}), showExportTip = ref(true), runTraces = ref({}), openRunId = ref(null), attachmentImageUrls = ref({})
+const agentMode = ref(localStorage.getItem('campusmind_agent_mode') === 'action' ? 'action' : 'study')
 const courses = ref([]), collaborationDialog = ref(false), collaborationCourseId = ref(0), collaborationLoading = ref(false), candidates = ref([]), delegations = ref([]), delegationQuestion = ref('')
 const collaborationPolicy = ref({ allow_matching: false, auto_respond: false, share_mastery: false, share_resource_titles: true })
 const artifactStudio = ref(false), artifactLoading = ref(false), artifactForm = ref({ mode: 'ppt', pages: 8, style: '课程复习', focus: '' })
 const memoryDialog = ref(false), memories = ref([]), memoryLoading = ref(false)
 const permissionDialog = ref(false), platformPermissions = ref({ allow_group_post: false, allow_friend_broadcast: false, allow_group_task: false, allow_peer_delegation: false, allow_resource_manage: false, allow_forum_publish: false })
-const projectDialog = ref(false), projects = ref([]), projectGoal = ref(''), projectLoading = ref(false), projectActionLoading = ref(false), selectedProjectId = ref(null)
+const projects = ref([]), projectGoal = ref(''), projectGoalInput = ref(null), projectLoading = ref(false), projectActionLoading = ref(false), selectedProjectId = ref(null)
 const pendingIncomingDelegations = computed(() => delegations.value.filter(item => !item.is_requester && item.status === 'pending'))
 const pendingMemoryCount = computed(() => memories.value.filter(item => item.status === 'indexed' && item.sync_request?.status === 'pending').length)
 const activeProjectCount = computed(() => projects.value.filter(item => item.status === 'active').length)
@@ -196,6 +194,21 @@ const incomingDelegations = computed(() => pendingIncomingDelegations.value)
 const autoHandledDelegations = computed(() => delegations.value.filter(item => !item.is_requester && ['processing', 'completed', 'failed'].includes(item.status)))
 const outgoingDelegations = computed(() => delegations.value.filter(item => item.is_requester))
 let collaborationPollTimer = null
+function setAgentMode (mode) {
+  agentMode.value = mode === 'action' ? 'action' : 'study'
+  localStorage.setItem('campusmind_agent_mode', agentMode.value)
+  if (agentMode.value === 'study') {
+    collaborationDialog.value = false
+    memoryDialog.value = false
+    permissionDialog.value = false
+  } else refreshProjects().catch(error => ElMessage.error(error.message))
+  nextTick(() => scroll())
+}
+function focusProjectGoal (value = '') {
+  setAgentMode('action')
+  if (value && !projectGoal.value) projectGoal.value = value
+  nextTick(() => projectGoalInput.value?.focus())
+}
 const scroll = () => nextTick(() => { if (scrollBox.value) scrollBox.value.scrollTop = scrollBox.value.scrollHeight })
 const isImageAttachment = file => /^image\//i.test(String(file?.mime_type || '')) || /\.(svg|png|jpe?g|webp)$/i.test(String(file?.file_name || ''))
 const imageAttachments = message => (message?.attachments || []).filter(isImageAttachment)
@@ -220,7 +233,7 @@ async function newThread () { const data = await post('/agent/threads', {}); awa
 const ask = text => { input.value = text; send() }
 async function chooseAttachment (event) { const file = event.target.files?.[0]; if (!file) return; if (file.size > 15 * 1024 * 1024) { ElMessage.warning('单个附件不能超过 15MB'); event.target.value = ''; return }; uploading.value = true; const body = new FormData(); body.append('file', file); body.append('thread_id', threadId.value || ''); try { const data = await api('/agent/attachments', { method: 'POST', body }); threadId.value = data.thread_id; pendingAttachments.value.push(data.attachment); ElMessage.success(data.message); threads.value = await api('/agent/threads') } catch (error) { ElMessage.error(error.message) } finally { uploading.value = false; event.target.value = '' } }
 const removeAttachment = id => { pendingAttachments.value = pendingAttachments.value.filter(file => file.id !== id) }
-async function send () { const content = input.value.trim(), attachmentIds = pendingAttachments.value.map(file => file.id); if ((!content && !attachmentIds.length) || loading.value) return; loading.value = true; input.value = ''; messages.value.push({ role: 'user', content: content || '请阅读我上传的附件。', attachments: [...pendingAttachments.value], created_at: new Date().toISOString() }); pendingAttachments.value = []; scroll(); try { const data = await post('/agent/chat', { thread_id: threadId.value, content, attachment_ids: attachmentIds }); threadId.value = data.thread_id; await loadMessages(threadId.value); threads.value = await api('/agent/threads') } catch (error) { ElMessage.error(error.message); messages.value.pop() } finally { loading.value = false; scroll() } }
+async function send () { const content = input.value.trim(), attachmentIds = pendingAttachments.value.map(file => file.id); if ((!content && !attachmentIds.length) || loading.value) return; loading.value = true; input.value = ''; messages.value.push({ role: 'user', content: content || '请阅读我上传的附件。', attachments: [...pendingAttachments.value], created_at: new Date().toISOString() }); pendingAttachments.value = []; scroll(); try { const data = await post('/agent/chat', { thread_id: threadId.value, content, attachment_ids: attachmentIds, mode: agentMode.value }); threadId.value = data.thread_id; await loadMessages(threadId.value); threads.value = await api('/agent/threads'); if (agentMode.value === 'action') await refreshProjects() } catch (error) { ElMessage.error(error.message); messages.value.pop() } finally { loading.value = false; scroll() } }
 const formatTime = value => {
   if (!value) return ''
   const text = String(value).trim()
@@ -276,10 +289,6 @@ async function refreshProjects () {
   if (!selectedProjectId.value || !data.some(item => item.id === selectedProjectId.value)) selectedProjectId.value = data[0]?.id || null
   return data
 }
-async function openProjectCenter (goal = '') {
-  if (typeof goal === 'string' && goal.trim()) projectGoal.value = goal.trim()
-  try { await refreshProjects(); projectDialog.value = true } catch (error) { ElMessage.error(error.message) }
-}
 async function createProjectFromGoal (goal = projectGoal.value) {
   const content = String(goal || '').trim()
   if (content.length < 6) return ElMessage.warning('请先写清楚希望总 Agent 推进的学习目标')
@@ -289,7 +298,6 @@ async function createProjectFromGoal (goal = projectGoal.value) {
     projectGoal.value = ''
     selectedProjectId.value = data.project.id
     await refreshProjects()
-    projectDialog.value = true
     ElMessage.success(data.message)
   } catch (error) { ElMessage.error(error.message) } finally { projectLoading.value = false }
 }
@@ -322,7 +330,11 @@ async function deleteProject (project) {
   try { const data = await api(`/agent/projects/${project.id}`, { method: 'DELETE' }); await refreshProjects(); ElMessage.success(data.message) } catch (error) { ElMessage.error(error.message) }
 }
 async function handleSupervisorAction (action) {
-  if (action.type === 'create_project') return openProjectCenter(action.goal || '')
+  if (action.type === 'create_project') {
+    setAgentMode('action')
+    projectGoal.value = action.goal || ''
+    return createProjectFromGoal(projectGoal.value)
+  }
   if (['group_post', 'friend_broadcast', 'group_task', 'peer_delegation'].includes(action.type) && action.request_id) {
     try {
       const data = await post(`/agent/platform-actions/${action.request_id}/confirm`, {})
@@ -387,7 +399,7 @@ onBeforeUnmount(() => { if (collaborationPollTimer) window.clearInterval(collabo
 </script>
 
 <style scoped>
-.workspace{max-width:1360px;min-height:calc(100vh - 72px);margin:auto;padding:28px 5vw;display:grid;grid-template-columns:280px 1fr;gap:20px}.panel{background:#fffdfa;border:1px solid #f1e2d8;border-radius:24px;box-shadow:0 10px 30px #9f4c2b0d}.sidebar{padding:18px;overflow:hidden}.primary{border:0;border-radius:14px;background:#c96d42;color:#fff;padding:10px 16px;font-weight:700;cursor:pointer}.new-thread{width:100%}.label,header span{color:#a68779;font-size:11px;font-weight:800;letter-spacing:1px}.agent-card{display:grid;gap:3px;padding:13px;border-radius:17px;background:#fff0e5;color:#73422e}.agent-card small,.hint,.composer small{color:#907b70}.hint{font-size:12px;line-height:1.65}.thread-list{max-height:calc(100vh - 390px);overflow:auto}.thread{display:block;width:100%;padding:10px;border:0;border-radius:12px;background:transparent;color:#725f55;text-align:left;text-overflow:ellipsis;overflow:hidden;white-space:nowrap;cursor:pointer}.thread:hover,.thread.active{background:#f9ece3;color:#a44e2c}.chat{height:calc(100vh - 128px);min-height:560px;max-height:760px;display:flex;flex-direction:column;overflow:hidden}.chat header{display:flex;justify-content:space-between;padding:23px 28px 12px}.chat h1{margin:5px 0;color:#5a3527;font-size:25px}.chat em{height:max-content;padding:7px 10px;border-radius:20px;background:#eff8ef;color:#57915d;font-size:12px;font-style:normal}.shortcuts,.exports,.attachments,.pending{display:flex;gap:6px;flex-wrap:wrap}.shortcuts{padding:0 28px 10px}.shortcuts button,.exports button,.attachments button,.pending span{padding:6px 9px;border:1px solid #f0d4c4;border-radius:10px;background:#fff7f1;color:#a05d41;font-size:11px;cursor:pointer}.exports button:nth-child(-n+4){background:#fff0e5;font-weight:700}.export-tip{margin:0 28px 13px;padding:8px 11px;border-radius:12px;background:#fff2e9;color:#96624c;font-size:12px}.messages{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:18px 28px;background:#fffcf9;border-top:1px solid #f5e8df;border-bottom:1px solid #f5e8df}.empty{padding:100px 15%;text-align:center;color:#9c8377;line-height:1.7}.bubble{max-width:78%;margin:12px 0;padding:12px 15px;border-radius:17px;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65}.bubble>b{font-size:11px;color:#b47b62}.bubble p{margin:4px 0}.bubble time{display:block;color:#ad9183;font-size:10px}.bubble.assistant{background:#f9ece3;color:#5f4437;border-bottom-left-radius:4px}.bubble.user{margin-left:auto;background:#c96d42;color:#fff;border-bottom-right-radius:4px}.bubble.user>b,.bubble.user time{color:#ffe1cf}.hidden{display:none}.chat form{padding:16px 24px}.chat textarea{box-sizing:border-box;width:100%;height:72px;resize:none;padding:12px;border:1px solid #ead8cd;border-radius:16px;background:#fff;color:#553a2d;font:inherit}.composer{display:flex;justify-content:space-between;align-items:center;margin-top:8px}.composer span{display:flex;gap:8px}.attach{border:0;border-radius:12px;padding:10px 12px;background:#fff0e5;color:#a85a3d;font-weight:700;cursor:pointer}@media(max-width:800px){.workspace{grid-template-columns:1fr;padding:15px}.sidebar{display:none}.chat{height:calc(100vh - 100px);min-height:0;max-height:none}.chat header{padding:20px}.chat em{display:none}.messages{padding:15px}.bubble{max-width:92%}.export-tip{margin:0 20px 12px}}
+.workspace{max-width:1360px;min-height:calc(100vh - 72px);margin:auto;padding:28px 5vw;display:grid;grid-template-columns:280px minmax(0,1fr);gap:20px}.workspace.action-mode{max-width:1680px;grid-template-columns:250px minmax(520px,1fr) minmax(320px,410px);padding-inline:3vw}.panel{background:#fffdfa;border:1px solid #f1e2d8;border-radius:24px;box-shadow:0 10px 30px #9f4c2b0d}.sidebar{padding:18px;overflow:hidden}.primary{border:0;border-radius:14px;background:#c96d42;color:#fff;padding:10px 16px;font-weight:700;cursor:pointer}.new-thread{width:100%}.label,header span{color:#a68779;font-size:11px;font-weight:800;letter-spacing:1px}.capability-label{margin-bottom:5px}.agent-card{display:grid;gap:3px;padding:13px;border-radius:17px;background:#fff0e5;color:#73422e}.agent-card small,.hint,.composer small{color:#907b70}.hint{font-size:12px;line-height:1.65}.thread-list{max-height:calc(100vh - 390px);overflow:auto}.thread{display:block;width:100%;padding:10px;border:0;border-radius:12px;background:transparent;color:#725f55;text-align:left;text-overflow:ellipsis;overflow:hidden;white-space:nowrap;cursor:pointer}.thread:hover,.thread.active{background:#f9ece3;color:#a44e2c}.chat{height:calc(100vh - 128px);min-height:560px;max-height:760px;display:flex;flex-direction:column;overflow:hidden}.chat header{display:flex;justify-content:space-between;gap:20px;padding:23px 28px 12px}.chat h1{margin:5px 0;color:#5a3527;font-size:25px}.chat em{height:max-content;padding:7px 10px;border-radius:20px;background:#eff8ef;color:#57915d;font-size:12px;font-style:normal}.shortcuts,.exports,.attachments,.pending{display:flex;gap:6px;flex-wrap:wrap}.shortcuts{padding:0 28px 10px}.shortcuts button,.exports button,.attachments button,.pending span{padding:6px 9px;border:1px solid #f0d4c4;border-radius:10px;background:#fff7f1;color:#a05d41;font-size:11px;cursor:pointer}.action-shortcuts button{border-color:#dccbea;background:#f8f2fb;color:#725486}.exports button:nth-child(-n+4){background:#fff0e5;font-weight:700}.export-tip{margin:0 28px 13px;padding:8px 11px;border-radius:12px;background:#fff2e9;color:#96624c;font-size:12px}.messages{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:18px 28px;background:#fffcf9;border-top:1px solid #f5e8df;border-bottom:1px solid #f5e8df}.empty{padding:100px 15%;text-align:center;color:#9c8377;line-height:1.7}.bubble{max-width:78%;margin:12px 0;padding:12px 15px;border-radius:17px;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65}.bubble>b{font-size:11px;color:#b47b62}.bubble p{margin:4px 0}.bubble time{display:block;color:#ad9183;font-size:10px}.bubble.assistant{background:#f9ece3;color:#5f4437;border-bottom-left-radius:4px}.bubble.user{margin-left:auto;background:#c96d42;color:#fff;border-bottom-right-radius:4px}.bubble.user>b,.bubble.user time{color:#ffe1cf}.hidden{display:none}.chat form{padding:16px 24px}.chat textarea{box-sizing:border-box;width:100%;height:72px;resize:none;padding:12px;border:1px solid #ead8cd;border-radius:16px;background:#fff;color:#553a2d;font:inherit}.composer{display:flex;justify-content:space-between;align-items:center;margin-top:8px}.composer span{display:flex;gap:8px}.attach{border:0;border-radius:12px;padding:10px 12px;background:#fff0e5;color:#a85a3d;font-weight:700;cursor:pointer}.mode-switch{display:flex;padding:3px;border-radius:13px;background:#f2e9e3}.mode-switch button{border:0;border-radius:10px;padding:7px 10px;background:transparent;color:#917568;font-size:11px;font-weight:800;cursor:pointer}.mode-switch button.active{background:#fffdfa;color:#a65031;box-shadow:0 2px 8px #70402a1a}.action-mode .mode-switch{background:#eee6f4}.action-mode .mode-switch button.active{color:#674879}.action-console{height:calc(100vh - 128px);min-height:560px;max-height:760px;box-sizing:border-box;padding:18px;overflow:auto}.action-console>header{display:flex;justify-content:space-between;align-items:flex-start}.action-console h2{margin:4px 0;color:#583a60;font-size:20px}.action-console>header em{padding:4px 8px;border-radius:9px;background:#eee3f3;color:#765086;font-size:10px;font-style:normal;font-weight:800}.action-note{padding:10px;border-radius:12px;background:#faf5fc;color:#7f6a84;font-size:11px;line-height:1.55}.action-project-create{grid-template-columns:1fr}.action-project-create textarea{min-height:74px}.action-project-create button{justify-self:end}.action-empty{padding:38px 10px;color:#9a849e;text-align:center;font-size:12px}.project-select{box-sizing:border-box;width:100%;margin:4px 0 10px;padding:9px;border:1px solid #e5d9e9;border-radius:12px;background:#fff;color:#604c65}.action-project-detail{display:grid;gap:8px}.action-project-head{display:flex;justify-content:space-between;gap:8px;padding:10px;border-radius:13px;background:#faf5fc}.action-project-head>div{min-width:0}.action-project-head b,.action-project-head small{display:block}.action-project-head b{color:#5c3e63;font-size:13px}.action-project-head small{display:-webkit-box;overflow:hidden;margin-top:4px;color:#8a748e;font-size:10px;line-height:1.4;-webkit-line-clamp:2;-webkit-box-orient:vertical}.action-step{display:grid;grid-template-columns:24px 1fr auto;gap:8px;align-items:start;padding:9px;border:1px solid #eee3f1;border-radius:13px;background:#fff}.action-step>span{display:grid;place-items:center;width:22px;height:22px;border-radius:50%;background:#eee5f1;color:#765286;font-size:10px;font-weight:800}.action-step.done>span{background:#dff0da;color:#518257}.action-step>div{min-width:0}.action-step b,.action-step small{display:block}.action-step b{color:#624c67;font-size:12px}.action-step small{margin-top:3px;color:#8d7a90;font-size:10px;line-height:1.45}.action-step button{padding:5px 7px;font-size:10px}.action-step>em{color:#9b879e;font-size:10px;font-style:normal}.action-step details{margin-top:6px;color:#806888;font-size:10px}.action-step details p{white-space:pre-wrap}.tiny-primary{border-radius:9px!important}.action-project-footer{display:flex;justify-content:flex-end}@media(max-width:1180px){.workspace.action-mode{grid-template-columns:240px minmax(0,1fr)}.action-console{grid-column:1/-1;height:auto;min-height:0;max-height:none}}@media(max-width:800px){.workspace,.workspace.action-mode{grid-template-columns:1fr;padding:15px}.sidebar{display:none}.chat{height:calc(100vh - 100px);min-height:0;max-height:none}.chat header{padding:20px;align-items:flex-start}.chat header>div:first-child h1{font-size:20px}.model-actions{max-width:190px}.chat em{display:none}.messages{padding:15px}.bubble{max-width:92%}.export-tip{margin:0 20px 12px}.action-console{grid-column:auto}.mode-switch button{padding:6px 8px}}
 .artifact-launch{display:flex;justify-content:space-between;align-items:center;margin:0 28px 13px;padding:9px 12px;border-radius:14px;background:#fff8f3;color:#8f6652;font-size:12px}.artifact-launch button{border:0;border-radius:11px;background:#c96d42;color:#fff;padding:8px 12px;font-weight:700;cursor:pointer}.artifact-modal{position:fixed;z-index:80;inset:0;display:grid;place-items:center;padding:18px;background:#4f2a1f66}.artifact-dialog{width:min(520px,100%);padding:24px;border-radius:24px;background:#fffdfa;box-shadow:0 24px 70px #3e160b44}.dialog-head{display:flex;justify-content:space-between;gap:16px}.dialog-head span{color:#b47b62;font-size:11px;font-weight:800;letter-spacing:1px}.dialog-head h2{margin:5px 0 0;color:#5a3527}.artifact-dialog>p{color:#826d62;font-size:13px;line-height:1.6}.artifact-dialog label{display:grid;gap:6px;margin:14px 0;color:#694838;font-size:13px;font-weight:700}.artifact-dialog select,.artifact-dialog input,.artifact-dialog textarea{width:100%;box-sizing:border-box;border:1px solid #ead8cd;border-radius:12px;padding:10px;background:#fff;color:#553a2d;font:inherit}.artifact-dialog textarea{height:72px;resize:vertical}.artifact-dialog small{display:block;color:#9a8175;line-height:1.55}.close,.dialog-actions button:not(.primary){border:0;border-radius:10px;background:#f7ebe4;color:#a05d41;padding:8px 11px;cursor:pointer}.close{height:max-content;font-size:20px;line-height:1}.dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}.dialog-actions .primary:disabled{opacity:.6}@media(max-width:800px){.artifact-launch{margin:0 20px 12px}.artifact-launch span{display:none}}
 .model-actions{display:grid;justify-items:end;gap:7px}.artifact-compact{border:0;border-radius:11px;background:#c96d42;color:#fff;padding:8px 11px;font-size:12px;font-weight:700;cursor:pointer}.agent-photo{display:inline-grid;width:38px;height:38px;overflow:hidden;vertical-align:middle;border-radius:13px;background:#eee1f5;color:#745288;font-size:19px}.agent-card{display:flex;align-items:center;gap:10px}.agent-card b,.agent-card small{display:block}.export-tip{display:flex;align-items:flex-start;gap:8px}.export-tip span{flex:1}.export-tip button{flex:none;border:0;background:transparent;color:#aa725a;font-size:19px;line-height:15px;cursor:pointer}
 @media(min-width:801px){.workspace{align-items:start}.panel{box-sizing:border-box}.sidebar,.chat{height:clamp(680px,calc(100vh - 80px),900px);min-height:680px;max-height:900px}.sidebar{display:flex;flex-direction:column}.thread-list{flex:1;min-height:0;max-height:none;overflow:auto}}
