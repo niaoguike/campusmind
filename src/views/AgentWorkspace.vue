@@ -37,7 +37,7 @@
             <div v-if="message.attachments?.length" class="attachments"><button v-for="file in message.attachments.filter(file => !isImageAttachment(file))" :key="file.id" @click="downloadAttachment(file)">📎 {{ file.file_name }}</button></div>
             <div v-if="agentMode === 'action' && message.role === 'assistant' && message.actions?.length" class="supervisor-actions">
               <span>行动工作台待确认</span>
-              <button v-for="action in message.actions" :key="action.request_id || action.type" type="button" :disabled="action.status && action.status !== 'pending'" @click="handleSupervisorAction(action)">{{ action.status === 'executed' ? '✓ 已执行' : action.status === 'cancelled' ? '已取消' : action.label }}</button>
+              <button v-for="action in message.actions" :key="action.request_id || action.type" type="button" :disabled="Boolean(action.request_id) && (action.status !== 'pending' || isConfirmingAction(action))" @click="handleSupervisorAction(action)">{{ actionButtonLabel(action) }}</button>
               <small v-for="action in message.actions" :key="`${action.request_id || action.type}-description`">{{ action.description }}</small>
             </div>
             <button v-if="message.role === 'assistant' && message.agent_run_id" class="trace-toggle" type="button" @click="toggleRunTrace(message.agent_run_id)">{{ openRunId === message.agent_run_id ? '收起协作过程' : '查看本次 Agent 协作过程' }}</button>
@@ -165,7 +165,7 @@ const collaborationPolicy = ref({ allow_matching: false, auto_respond: false, sh
 const artifactStudio = ref(false), artifactLoading = ref(false), artifactForm = ref({ mode: 'ppt', pages: 8, style: '课程复习', focus: '' })
 const memoryDialog = ref(false), memories = ref([]), memoryLoading = ref(false)
 const permissionDialog = ref(false), platformPermissions = ref({ allow_group_post: false, allow_friend_broadcast: false, allow_group_task: false, allow_peer_delegation: false, allow_resource_manage: false, allow_forum_publish: false })
-const projects = ref([]), projectLoading = ref(false), selectedProjectId = ref(null)
+const projects = ref([]), projectLoading = ref(false), selectedProjectId = ref(null), confirmingActionIds = ref([])
 const pendingIncomingDelegations = computed(() => delegations.value.filter(item => !item.is_requester && item.status === 'pending'))
 const pendingMemoryCount = computed(() => memories.value.filter(item => item.status === 'indexed' && item.sync_request?.status === 'pending').length)
 const incomingDelegations = computed(() => pendingIncomingDelegations.value)
@@ -289,20 +289,38 @@ async function handleSupervisorAction (action) {
     await loadMessages(threadId.value)
     return
   }
-  if (['group_post', 'friend_broadcast', 'group_task', 'peer_delegation', 'forum_publish'].includes(action.type) && action.request_id) {
+  if (action.request_id) {
+    const requestId = Number(action.request_id)
+    if (!requestId || isConfirmingAction(action) || action.status !== 'pending') return
+    confirmingActionIds.value = [...new Set([...confirmingActionIds.value, requestId])]
     try {
-      const data = await post(`/agent/platform-actions/${action.request_id}/confirm`, {})
+      const data = await post(`/agent/platform-actions/${requestId}/confirm`, {})
       action.status = data.status
       ElMessage.success(data.message)
       await loadMessages(threadId.value)
       await refreshDelegations()
-    } catch (error) { ElMessage.error(error.message) }
+    } catch (error) {
+      // 即使网络慢或用户误触两次，也刷新一次：后端可能已完成第一次确认。
+      await loadMessages(threadId.value).catch(() => {})
+      ElMessage.error(error.message)
+    } finally {
+      confirmingActionIds.value = confirmingActionIds.value.filter(id => id !== requestId)
+    }
     return
   }
   if (action.type === 'open_platform_permissions') return openPermissionDialog()
   if (action.type === 'open_group_discussion') return router.push('/messages')
   if (action.type === 'open_peer_collaboration') return openCollaboration()
   ElMessage.info(action.description || '此协作入口暂不可用')
+}
+const isConfirmingAction = action => Number(action?.request_id || 0) > 0 && confirmingActionIds.value.includes(Number(action.request_id))
+const actionButtonLabel = action => {
+  if (isConfirmingAction(action) || action.status === 'processing') return '正在确认…'
+  if (action.status === 'executed') return '✓ 已执行'
+  if (action.status === 'cancelled') return '已取消'
+  if (action.status === 'expired') return '已过期'
+  if (action.status === 'failed') return '执行失败'
+  return action.label
 }
 async function saveCollaborationPolicy () {
   if (!collaborationCourseId.value) return ElMessage.warning('请先选择课程')

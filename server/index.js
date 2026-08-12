@@ -1299,6 +1299,19 @@ function createPlatformActionRequests (userId, threadId, actions) {
     return {...action,request_id:id,status:'pending'}
   })
 }
+// 操作卡保存在对话消息的 JSON 中，但真正的执行状态以数据库中的请求记录为准。
+// 每次读取对话时重新补全状态，避免“已经执行，旧卡片仍显示待确认”。
+function hydratePlatformActionStatuses (actions) {
+  const findRequest=db.prepare('SELECT status,expires_at,executed_at FROM agent_platform_action_requests WHERE id=?')
+  return (Array.isArray(actions)?actions:[]).map(action=>{
+    const requestId=Number(action?.request_id||0)
+    if(!requestId)return action
+    const request=findRequest.get(requestId)
+    if(!request)return {...action,status:'expired'}
+    const expired=request.status==='pending'&&request.expires_at&&Date.parse(request.expires_at)<Date.now()
+    return {...action,status:expired?'expired':request.status,executed_at:request.executed_at||''}
+  })
+}
 function linkProjectAction (stepId, action) {
   db.prepare("UPDATE agent_project_steps SET status='awaiting_confirmation',action_request_id=?,action_payload_json=?,updated_at=? WHERE id=?")
     .run(action.request_id,JSON.stringify(action.payload||{}),now(),stepId)
@@ -2003,13 +2016,20 @@ app.post('/api/agent/projects/:projectId/steps/:stepId/prepare',auth,async(req,r
   } catch(error) { return res.status(400).json({error:error.message||'准备项目步骤失败'}) }
 })
 app.post('/api/agent/platform-actions/:id/confirm',auth,async(req,res)=>{
-  const request=db.prepare("SELECT * FROM agent_platform_action_requests WHERE id=? AND user_id=? AND status='pending'").get(req.params.id,req.user.id)
-  if(!request)return res.status(404).json({error:'该 Agent 操作不存在、已处理或无权确认'})
-  if(request.expires_at&&Date.parse(request.expires_at)<Date.now()){db.prepare("UPDATE agent_platform_action_requests SET status='expired' WHERE id=?").run(request.id);return res.status(410).json({error:'该操作确认已过期，请重新向我的 Agent 下达指令'})}
+  const requestId=Number(req.params.id)
+  const request=db.prepare("SELECT * FROM agent_platform_action_requests WHERE id=? AND user_id=?").get(requestId,req.user.id)
+  if(!request)return res.status(404).json({error:'该 Agent 操作不存在或无权确认'})
+  if(request.status==='executed')return res.status(409).json({error:'该操作已经完成，请刷新当前对话查看结果。',status:'executed'})
+  if(request.status==='processing')return res.status(409).json({error:'该操作正在处理中，请稍候刷新当前对话。',status:'processing'})
+  if(request.status!=='pending')return res.status(409).json({error:`该操作当前状态为“${request.status}”，不能再次确认。`,status:request.status})
+  if(request.expires_at&&Date.parse(request.expires_at)<Date.now()){db.prepare("UPDATE agent_platform_action_requests SET status='expired' WHERE id=? AND status='pending'").run(request.id);return res.status(410).json({error:'该操作确认已过期，请重新向我的 Agent 下达指令',status:'expired'})}
   const permissionFields={group_post:'allow_group_post',friend_broadcast:'allow_friend_broadcast',group_task:'allow_group_task',peer_delegation:'allow_peer_delegation',project_plan:null,resource_organize:'allow_resource_manage',forum_publish:'allow_forum_publish'}
   if(!Object.prototype.hasOwnProperty.call(permissionFields,request.action_type))return res.status(400).json({error:'该平台操作类型不受支持'})
   const permissionField=permissionFields[request.action_type]
   if(permissionField&&!platformPermissionsOf(req.user.id)[permissionField])return res.status(403).json({error:'该平台权限已关闭，请在“我的 Agent → 总 Agent 平台权限”中重新开启后再下达指令'})
+  // 先原子地把 pending 领用为 processing。即使用户快速点击两次，也只会有一个请求真正执行。
+  const claimed=db.prepare("UPDATE agent_platform_action_requests SET status='processing' WHERE id=? AND user_id=? AND status='pending'").run(request.id,req.user.id)
+  if(!claimed.changes)return res.status(409).json({error:'该操作已被处理或正在处理中，请刷新当前对话。'})
   try {
     const message=await executePlatformActionRequest(request)
     db.prepare("UPDATE agent_platform_action_requests SET status='executed',executed_at=? WHERE id=?").run(now(),request.id)
@@ -2066,7 +2086,7 @@ app.post('/api/agent/threads',auth,(req,res)=>{
 })
 app.get('/api/agent/threads/:id/messages',auth,(req,res)=>{
   if(!db.prepare('SELECT 1 FROM agent_threads WHERE id=? AND user_id=?').get(req.params.id,req.user.id))return res.status(404).json({error:'对话不存在'})
-  res.json(db.prepare('SELECT role,content,agent_type,agent_run_id,created_at,attachments_json,actions_json FROM agent_messages WHERE thread_id=? ORDER BY id').all(req.params.id).map(message=>({...message,attachments:JSON.parse(message.attachments_json||'[]'),actions:safeJson(message.actions_json,[])})))
+  res.json(db.prepare('SELECT role,content,agent_type,agent_run_id,created_at,attachments_json,actions_json FROM agent_messages WHERE thread_id=? ORDER BY id').all(req.params.id).map(message=>({...message,attachments:JSON.parse(message.attachments_json||'[]'),actions:hydratePlatformActionStatuses(safeJson(message.actions_json,[]))})))
 })
 app.get('/api/agent/runs/:id',auth,(req,res)=>{
   const run=db.prepare('SELECT * FROM agent_runs WHERE id=? AND user_id=?').get(req.params.id,req.user.id)
@@ -2100,9 +2120,9 @@ app.post('/api/agent/chat',auth,async(req,res)=>{
   const memoryBrief=accessibleMemoryBrief(user.id,content)
   if(memoryBrief) history.unshift({role:'system',content:memoryBrief})
   const supervisorActions=mode==='action'?[...platformActions,...supervisorActionsFor(user,content,actionIntent)]:[]
-  if(mode==='action'&&supervisorActions.length)history.unshift({role:'system',content:`系统已为本次请求准备以下待确认行动入口：${supervisorActions.map(action=>action.label).join('；')}。请说明这些操作仍需用户点击确认，不要称自己没有平台操作能力。`})
+  if(mode==='action'&&supervisorActions.length)history.unshift({role:'system',content:`系统已为本次请求准备以下行动入口：${supervisorActions.map(action=>action.label).join('；')}。只有这些真实入口存在时，才能提及“点击确认”或“确认按钮”；请说明它们仍需用户点击确认，不要称自己没有平台操作能力。`})
   history.unshift({role:'system',content:mode==='action'
-    ?'当前处于“行动工作台”。你是用户的 CampusMind 总行动 Agent，可拆解复杂目标并协调学习计划、本人资料库、校园论坛、学习群和获授权的其他 Agent。只能使用系统生成的结构化操作入口，不得声称已经执行尚未确认的动作；发送消息、移动资料、公开发帖或联系其他用户 Agent 必须等用户点击确认。你没有服务器 Shell、任意数据库写入或部署权限。'
+    ?'当前处于“行动工作台”。你是用户的 CampusMind 总行动 Agent，可拆解复杂目标并协调学习计划、本人资料库、校园论坛、学习群和获授权的其他 Agent。只能使用系统生成的结构化操作入口，不得声称已经执行尚未确认的动作；发送消息、移动资料、公开发帖或联系其他用户 Agent 必须等用户点击确认。若系统没有提供真实行动入口，不得编造或要求用户点击“确认发送 / 确认发布 / 确认委托”按钮，应明确说本次没有可点击操作卡并请用户补充目标。保持高校学习助手身份，只能基于用户明确给出的信息起草内容；不得编造他人隐私，也不得起草侮辱、骚扰或攻击性消息。你没有服务器 Shell、任意数据库写入或部署权限。'
     :'当前处于“学习问答”。只提供课程解释、课程资料检索、练习辅导、学习建议、复盘和学习成果生成。不得创建或建议执行群发消息、论坛发布、资料移动、跨用户 Agent 委托或其他平台写操作；如果用户要求执行平台动作，请说明需要切换到“行动工作台”。'})
   const orchestration=await createPersonalLearningRun(user,content)
   let trace=null
@@ -2123,8 +2143,14 @@ app.post('/api/agent/chat',auth,async(req,res)=>{
       console.error('Automatic agent export error:',error)
       answer+=`\n\n${error.code==='PDF_FONT_UNAVAILABLE'?'PDF 生成功能尚未配置中文字体，请联系管理员完成字体配置。':'文件生成失败，请稍后在回复下方重新尝试。'}`
     }
-    if(platformActions.length) answer+=`\n\n我已根据你的授权准备好平台操作。请在下方逐项确认；确认前不会发送任何消息、创建任务或联系其他用户的 Agent。`
-    else if(supervisorActions.length) answer+=`\n\n我已识别到需要调用外部协作能力。请使用下方入口确认下一步；在确认前，我不会向其他 Agent 发送任何信息。`
+    const externalActionRequested=groupMessageIntent(content)||forumPublishIntent(content)||peerAgentRequestIntent(content)||actionIntent.intent==='group_post'||actionIntent.intent==='forum_publish'
+    if(platformActions.length) {
+      answer=`我已根据你的明确指令准备好以下待确认操作：${platformActions.map(action=>`“${action.label}”`).join('、')}。\n\n请核对下方操作卡后点击一次确认；在确认前，系统不会发送消息、发布帖子、创建任务或联系其他用户的 Agent。`
+    } else if(mode==='action'&&externalActionRequested) {
+      answer=supervisorActions.length
+        ?'本次尚未生成可执行确认卡。请先使用下方入口补充权限或确认目标群 / 课程，然后重新发送你的请求；在出现明确的待确认操作卡之前，系统不会执行任何平台操作。'
+        :'本次尚未生成可执行确认卡，因此没有任何平台操作已经准备或执行。请补充明确的目标对象、课程或内容，并在“行动权限与确认”中检查相应权限。'
+    } else if(supervisorActions.length) answer+=`\n\n我已识别到可继续执行的下一步，请使用下方真实入口继续；没有出现待确认操作卡时，不代表已经准备或执行了外部操作。`
     completePersonalRunTrace(trace.runId,orchestration.type,answer)
     db.prepare('INSERT INTO agent_messages (thread_id,role,content,agent_type,agent_run_id,attachments_json,actions_json) VALUES (?,?,?,?,?,?,?)').run(threadId,'assistant',answer,orchestration.type,trace.runId,JSON.stringify(generated),JSON.stringify(supervisorActions))
     db.prepare('UPDATE agent_threads SET updated_at=? WHERE id=?').run(now(),threadId)
