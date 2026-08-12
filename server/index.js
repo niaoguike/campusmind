@@ -1218,6 +1218,42 @@ function groupMessageIntent (content='') {
   const text=String(content||'')
   return /(?:发送|发消息|转发|通知|告诉|说|发).{0,28}(?:群|小组|讨论组)|(?:群|小组|讨论组).{0,28}(?:发送|发消息|转发|通知|告诉|说|发)/i.test(text)
 }
+function forumPublishIntent (content='') {
+  const text=String(content||'')
+  return /(?:校园|学校|平台)?论坛/i.test(text)&&/(?:发帖|发布|发表|发(?:一)?(?:篇|个)|写(?:一)?(?:篇|个)|帖子)/i.test(text)
+}
+function normalizedActionIntent (value='') {
+  const allowed=new Set(['forum_publish','group_post','friend_broadcast','group_task','peer_delegation','resource_organize','none'])
+  return allowed.has(String(value||''))?String(value):'none'
+}
+function actionDraftFallback (content='') {
+  const subject=String(content||'学习交流').replace(/(?:帮我|请|在|往|向|到|给|校园论坛|论坛|发帖|发布|发表|发一篇|发个|帖子|一下|一篇|吧|。|，|,)/g,' ').replace(/\s+/g,' ').trim().slice(0,48)||'学习交流'
+  return {title:`想和大家交流：${subject}`,content:`大家好，我想在校园论坛交流一下：${subject}。\n\n目前我的想法和困惑是：希望听听大家的学习经验、推荐资料或容易踩坑的地方。\n\n欢迎理性、友善地分享自己的建议，感谢大家！`,category:'学习交流',poll_question:'',poll_options:[]}
+}
+function normalizeActionForumDraft (candidate, content) {
+  const fallback=actionDraftFallback(content)
+  const draft={title:String(candidate?.title||fallback.title).trim().slice(0,60),content:String(candidate?.content||fallback.content).trim().slice(0,1600),category:String(candidate?.category||fallback.category).trim().slice(0,30)||'学习交流',poll_question:String(candidate?.poll_question||'').trim().slice(0,120),poll_options:Array.isArray(candidate?.poll_options)?candidate.poll_options.map(item=>String(item||'').trim()).filter(Boolean).slice(0,4):[]}
+  if(moderationError(draft.title,draft.content,draft.poll_question,...draft.poll_options))return fallback
+  if((draft.poll_question&&!draft.poll_options.length)||(!draft.poll_question&&draft.poll_options.length)||draft.poll_options.length===1)return {...draft,poll_question:'',poll_options:[]}
+  return draft
+}
+async function analyzeActionIntent (user, content='') {
+  const groups=userGroups(user.id).map(group=>group.title).filter(Boolean).slice(0,30)
+  const prompt=`你是 CampusMind 行动意图分析器。只返回一个合法 JSON 对象，绝不执行平台操作。可选 intent 只有 forum_publish、group_post、friend_broadcast、group_task、peer_delegation、resource_organize、none。\n\n对于 forum_publish：只有用户明确希望在校园论坛公开发表时才选择，并提供 forum.title、forum.content、forum.category、forum.poll_question、forum.poll_options。内容应根据用户意图写成一篇友善的学习交流帖，不得编造事实、不得含敏感内容。\n对于 group_post：提取 group_target 与 message。只能从下列用户所在学习群中选择目标：${JSON.stringify(groups)}。\n对于其他操作只填写必要字段。若只是提问、解释、建议或不确定，intent 必须是 none。\n\nJSON 结构：{"intent":"none","confidence":0,"group_target":"","message":"","task_title":"","forum":{"title":"","content":"","category":"学习交流","poll_question":"","poll_options":[]}}`
+  try {
+    const raw=await callExternalAgent(user,prompt,[{role:'user',content:String(content||'').slice(0,4000)}],user)
+    const parsed=parseModelObject(raw,{})
+    const confidence=Math.max(0,Math.min(1,Number(parsed.confidence)||0))
+    return {intent:confidence>=0.55?normalizedActionIntent(parsed.intent):'none',confidence,group_target:String(parsed.group_target||'').trim().slice(0,80),message:String(parsed.message||'').trim().slice(0,2000),task_title:String(parsed.task_title||'').trim().slice(0,100),forum:normalizeActionForumDraft(parsed.forum,content)}
+  } catch {
+    return {intent:'none',confidence:0,group_target:'',message:'',task_title:'',forum:actionDraftFallback(content)}
+  }
+}
+function saveDirectForumDraft (userId, draft) {
+  const result=db.prepare("INSERT INTO agent_forum_drafts (user_id,project_id,title,content,category,poll_question,poll_options_json,status,created_at,updated_at) VALUES (?,NULL,?,?,?,?,?,'draft',?,?)")
+    .run(userId,draft.title,draft.content,draft.category,draft.poll_question,JSON.stringify(draft.poll_options||[]),now(),now())
+  return Number(result.lastInsertRowid)
+}
 function privateConversationFor (userId, friendId) {
   const existing=db.prepare("SELECT c.id FROM conversations c WHERE c.type='private' AND EXISTS(SELECT 1 FROM conversation_members a WHERE a.conversation_id=c.id AND a.user_id=?) AND EXISTS(SELECT 1 FROM conversation_members b WHERE b.conversation_id=c.id AND b.user_id=?) LIMIT 1").get(userId,friendId)
   if(existing)return existing.id
@@ -1225,13 +1261,18 @@ function privateConversationFor (userId, friendId) {
   add.run(created.lastInsertRowid,userId);add.run(created.lastInsertRowid,friendId)
   return Number(created.lastInsertRowid)
 }
-function proposePlatformActions (user, content) {
+async function proposePlatformActions (user, content, actionIntent={}) {
   const permissions=platformPermissionsOf(user.id),text=String(content||'').trim(),actions=[]
-  const group=exactGroupInCommand(user.id,text)
+  const semanticGroup=actionIntent.group_target?exactGroupInCommand(user.id,`向${actionIntent.group_target}${/(?:群|小组|讨论组)$/.test(actionIntent.group_target)?'':'群'}发消息`):null
+  const group=exactGroupInCommand(user.id,text)||semanticGroup
   const add=(type,label,description,payload)=>actions.push({type,label,description,payload})
-  if(group&&permissions.allow_group_post&&groupMessageIntent(text)){
-    const payload=commandPayload(text,['发送','发消息','转发','通知','告诉','说','发'])
+  if(group&&permissions.allow_group_post&&(groupMessageIntent(text)||actionIntent.intent==='group_post')){
+    const payload=actionIntent.intent==='group_post'&&actionIntent.message?actionIntent.message:commandPayload(text,['发送','发消息','转发','通知','告诉','说','发'])
     if(payload&&payload!==text)add('group_post',`确认发送到“${group.title}”`,`将以你的身份发送：${payload.slice(0,120)}`,{conversation_id:group.id,conversation_title:group.title,content:payload.slice(0,2000)})
+  }
+  if(permissions.allow_forum_publish&&(forumPublishIntent(text)||actionIntent.intent==='forum_publish')) {
+    const draft=normalizeActionForumDraft(actionIntent.forum,text),draftId=saveDirectForumDraft(user.id,draft)
+    add('forum_publish','确认发布到校园论坛',`草稿标题：${draft.title}\n发布前会再次检查敏感词；确认后将以你的身份公开发布。`,{draft_id:draftId,draft})
   }
   if(permissions.allow_friend_broadcast&&/(所有好友|全部好友|每个好友|全体好友)/.test(text)&&/(发送|发消息|转发|通知|告诉)/.test(text)){
     const payload=commandPayload(text,['发送','发消息','转发','通知','告诉'])
@@ -1699,13 +1740,17 @@ app.post('/api/learning/quizzes/:id/submit',auth,async(req,res)=>{
  * 个人学习 Agent 的第一阶段运行时。
  * 协调器先按意图挑选专业 Agent；每个 Agent 只获得完成该任务必要的工具。
  */
-function supervisorActionsFor (user, content='') {
+function supervisorActionsFor (user, content='', actionIntent={}) {
   const text=String(content||'')
   const actions=[]
-  if(groupMessageIntent(text)) {
-    const permissions=platformPermissionsOf(user.id),group=exactGroupInCommand(user.id,text)
+  if(groupMessageIntent(text)||actionIntent.intent==='group_post') {
+    const permissions=platformPermissionsOf(user.id),semanticTarget=actionIntent.group_target?`向${actionIntent.group_target}${/(?:群|小组|讨论组)$/.test(actionIntent.group_target)?'':'群'}发消息`:'',group=exactGroupInCommand(user.id,text)||exactGroupInCommand(user.id,semanticTarget)
     if(!permissions.allow_group_post) actions.push({type:'open_platform_permissions',label:'开启“准备群消息”权限',description:'开启后重新发送这条消息。总 Agent 会先生成待确认的群消息卡，不会直接发送。'})
     else if(!group) actions.push({type:'open_group_discussion',label:'打开学习协作并确认目标群',description:'没有唯一匹配到目标学习群。请使用群的完整名称，或在学习协作中打开目标群后再让总 Agent 准备消息。'})
+  }
+  if(forumPublishIntent(text)||actionIntent.intent==='forum_publish') {
+    const permissions=platformPermissionsOf(user.id)
+    if(!permissions.allow_forum_publish) actions.push({type:'open_platform_permissions',label:'开启“发布论坛草稿”权限',description:'开启后重新发送这条请求。总 Agent 会先生成帖子草稿，再显示“确认发布到校园论坛”按钮。'})
   }
   if(/(?:帮我|请|我要|我想).{0,18}(?:完成|推进|制定|规划|准备|冲刺|安排|带我完成).{0,120}(?:学习|复习|考试|课程|项目|任务)|(?:学习|复习|考试|课程|项目|任务).{0,80}(?:计划|规划|路线|怎么完成)|(?:帮我|请).{0,20}(?:整理|管理|归档|盘点).{0,36}(?:资料|资料库)|(?:帮我|请).{0,20}(?:收集|咨询|了解).{0,45}(?:论坛|同学|其他 Agent|学习经验)/i.test(text)){
     actions.push({type:'create_project',label:'交给总 Agent 建立项目并拆解',description:'总 Agent 会将目标拆成学习计划、个人资料整理、论坛经验收集和同课程 Agent 协作四个可追踪步骤；涉及外部操作时仍需你确认。',goal:text.slice(0,1000)})
@@ -1724,7 +1769,7 @@ function supervisorActionsFor (user, content='') {
   }
   return actions
 }
-function createPersonalLearningRun (user, content) {
+async function createPersonalLearningRun (user, content) {
   const userId = user.id
   const search = createCourseResourceSearchTool({ db, searchKnowledgeChunks })
   const { snapshot, remember } = createLearningStateTools({ db, userId, now })
@@ -2042,16 +2087,18 @@ app.post('/api/agent/chat',auth,async(req,res)=>{
   const publicAttachments=attachments.map(publicAgentAttachment)
   db.prepare('INSERT INTO agent_messages (thread_id,role,content,attachments_json) VALUES (?,?,?,?)').run(threadId,'user',content||'请阅读我上传的附件。',JSON.stringify(publicAttachments))
 
-  const platformActions=mode==='action'?createPlatformActionRequests(user.id,threadId,proposePlatformActions(user,content)):[]
+  const actionIntent=mode==='action'?await analyzeActionIntent(user,content):{intent:'none',confidence:0}
+  const proposedActions=mode==='action'?await proposePlatformActions(user,content,actionIntent):[]
+  const platformActions=mode==='action'?createPlatformActionRequests(user.id,threadId,proposedActions):[]
   const history=buildThreadHistory({db,threadId,userId:user.id,attachmentContext})
   const memoryBrief=accessibleMemoryBrief(user.id,content)
   if(memoryBrief) history.unshift({role:'system',content:memoryBrief})
-  const supervisorActions=mode==='action'?[...platformActions,...supervisorActionsFor(user,content)]:[]
+  const supervisorActions=mode==='action'?[...platformActions,...supervisorActionsFor(user,content,actionIntent)]:[]
   if(mode==='action'&&supervisorActions.length)history.unshift({role:'system',content:`系统已为本次请求准备以下待确认行动入口：${supervisorActions.map(action=>action.label).join('；')}。请说明这些操作仍需用户点击确认，不要称自己没有平台操作能力。`})
   history.unshift({role:'system',content:mode==='action'
     ?'当前处于“行动工作台”。你是用户的 CampusMind 总行动 Agent，可拆解复杂目标并协调学习计划、本人资料库、校园论坛、学习群和获授权的其他 Agent。只能使用系统生成的结构化操作入口，不得声称已经执行尚未确认的动作；发送消息、移动资料、公开发帖或联系其他用户 Agent 必须等用户点击确认。你没有服务器 Shell、任意数据库写入或部署权限。'
     :'当前处于“学习问答”。只提供课程解释、课程资料检索、练习辅导、学习建议、复盘和学习成果生成。不得创建或建议执行群发消息、论坛发布、资料移动、跨用户 Agent 委托或其他平台写操作；如果用户要求执行平台动作，请说明需要切换到“行动工作台”。'})
-  const orchestration=createPersonalLearningRun(user,content)
+  const orchestration=await createPersonalLearningRun(user,content)
   let trace=null
   try {
     trace=createPersonalRunTrace({user,threadId,content,intent:orchestration.type})

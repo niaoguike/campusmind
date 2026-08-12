@@ -344,7 +344,7 @@ async function handleSupervisorAction (action) {
     projectGoal.value = action.goal || ''
     return createProjectFromGoal(projectGoal.value)
   }
-  if (['group_post', 'friend_broadcast', 'group_task', 'peer_delegation'].includes(action.type) && action.request_id) {
+  if (['group_post', 'friend_broadcast', 'group_task', 'peer_delegation', 'forum_publish'].includes(action.type) && action.request_id) {
     try {
       const data = await post(`/agent/platform-actions/${action.request_id}/confirm`, {})
       action.status = data.status
