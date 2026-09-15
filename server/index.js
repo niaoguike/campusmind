@@ -679,6 +679,28 @@ async function queueUnprocessedResources () {
 setTimeout(() => { queueUnprocessedResources().catch(error => console.error('历史资料索引任务异常：', error.message)) }, 1500)
 
 const app=express(); app.use(cors()); app.use(express.json({limit:'1mb'})); app.use('/uploads/resources',express.static(resourceUploadDir)); app.use('/api/avatars',express.static(avatarUploadDir,{maxAge:'1d'}))
+// Kept before the older member route below so group owners can safely leave too:
+// they explicitly choose a successor, while a one-person group must be dissolved.
+app.delete('/api/conversations/:id/members/me',auth,(req,res)=>{
+  const conversation=conversationOf(req.params.id)
+  if(!conversation||conversation.type!=='group'||!member(conversation.id,req.user.id))return res.status(404).json({error:'该学习群不存在或你已不在群内'})
+  const isCurrentOwner=ownerOf(conversation.id,req.user.id)
+  const successorId=Number(req.body?.successor_id||0)
+  if(isCurrentOwner&&!successorId)return res.status(400).json({error:'群主退出前请选择一名仍在群内的成员接任群主'})
+  const successor=isCurrentOwner?db.prepare('SELECT u.id,u.name FROM conversation_members cm JOIN users u ON u.id=cm.user_id WHERE cm.conversation_id=? AND cm.user_id=? AND cm.user_id!=?').get(conversation.id,successorId,req.user.id):null
+  if(isCurrentOwner&&!successor)return res.status(400).json({error:'群内只有你自己，请使用“解散群聊”删除该群'})
+  const leave=db.transaction(()=>{
+    if(successor)db.prepare('UPDATE conversations SET owner_id=? WHERE id=?').run(successor.id,conversation.id)
+    db.prepare('DELETE FROM conversation_members WHERE conversation_id=? AND user_id=?').run(conversation.id,req.user.id)
+    db.prepare('DELETE FROM group_agents WHERE conversation_id=? AND user_id=?').run(conversation.id,req.user.id)
+    db.prepare('DELETE FROM group_learning_consents WHERE conversation_id=? AND user_id=?').run(conversation.id,req.user.id)
+    db.prepare('DELETE FROM conversation_reads WHERE conversation_id=? AND user_id=?').run(conversation.id,req.user.id)
+    db.prepare("UPDATE agent_group_requests SET status='rejected' WHERE conversation_id=? AND agent_owner_id=? AND status='pending'").run(conversation.id,req.user.id)
+  })
+  leave()
+  eventLog({actorUserId:req.user.id,targetUserId:successor?.id||null,eventType:'group_left',scope:{conversation_id:conversation.id},payload:{owner_transferred_to:successor?.id||null},status:'done'})
+  res.json({message:successor?`已将群主转交给“${successor.name}”，并退出群聊“${conversation.title}”`:`你已退出群聊“${conversation.title}”`})
+})
 function requireAdmin (req,res,next) { if(!isAdmin(req.user.id))return res.status(403).json({error:'仅管理员可以执行此操作'}); next() }
 function auditLog (actorId, action, target=null, detail='') { db.prepare('INSERT INTO admin_audit_logs (actor_id,action,target_user_id,target_student_id,detail,created_at) VALUES (?,?,?,?,?,?)').run(actorId,action,target?.id||null,target?.student_id||'',String(detail||'').slice(0,1000),now()) }
 async function removeStudentAccount (target, actorId, detail='') {

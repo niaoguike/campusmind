@@ -22,6 +22,11 @@
             <el-input v-model="dissolveConfirm" :placeholder="`输入“${conversation.title}”确认解散`" />
             <button class="danger" type="button" :disabled="saving || dissolveConfirm.trim() !== conversation.title" @click="dissolveGroup">解散群聊</button>
           </section>
+          <section class="danger-card leave-card">
+            <div><b>退出群聊</b><small>请先指定一名仍在群内的成员接任群主，再安全退出；群内消息与任务会保留。</small></div>
+            <el-select v-model="successorId" placeholder="选择接任群主" style="width:100%"><el-option v-for="item in ownerSuccessors" :key="item.id" :label="item.name" :value="item.id" /></el-select>
+            <button class="danger" type="button" :disabled="saving || !successorId" @click="leaveGroup">移交群主并退出</button>
+          </section>
         </template>
 
         <section v-else class="danger-card leave-card">
@@ -34,7 +39,7 @@
 </template>
 
 <script setup>
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '../utils/api'
 
@@ -43,14 +48,20 @@ const props = defineProps({
   isOwner: { type: Boolean, default: false }
 })
 const emit = defineEmits(['updated', 'removed'])
-const visible = ref(false), saving = ref(false), titleDraft = ref(''), dissolveConfirm = ref('')
+const visible = ref(false), saving = ref(false), titleDraft = ref(''), dissolveConfirm = ref(''), successorId = ref(null), groupMembers = ref([])
+const currentUserId = Number(JSON.parse(localStorage.getItem('user') || '{}').id || 0)
+const ownerSuccessors = computed(() => groupMembers.value.filter(item => Number(item.id) !== currentUserId))
 
 function syncDrafts () {
   titleDraft.value = props.conversation?.title || ''
   dissolveConfirm.value = ''
+  successorId.value = null
 }
-function openDialog () {
+async function openDialog () {
   syncDrafts()
+  if (props.isOwner) {
+    try { groupMembers.value = await api(`/conversations/${props.conversation.id}/members`) } catch (error) { ElMessage.error(error.message); return }
+  }
   visible.value = true
 }
 async function renameGroup () {
@@ -71,7 +82,8 @@ async function leaveGroup () {
   try {
     await ElMessageBox.confirm('退出后你将失去该群的聊天、任务与协作空间访问权。已明确保存到个人记忆的成果不会被删除。', '确认退出群聊', { confirmButtonText: '确认退出', cancelButtonText: '取消', type: 'warning' })
     saving.value = true
-    const data = await api(`/conversations/${props.conversation.id}/members/me`, { method: 'DELETE' })
+    const payload = props.isOwner ? { successor_id: successorId.value } : {}
+    const data = await api(`/conversations/${props.conversation.id}/members/me`, { method: 'DELETE', body: JSON.stringify(payload) })
     ElMessage.success(data.message || '已退出群聊')
     visible.value = false
     emit('removed')
