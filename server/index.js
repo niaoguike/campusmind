@@ -1678,7 +1678,7 @@ function forumCommentsForPost (postId) {
   if (!forumCommentHasParentColumn()) {
     return db.prepare('SELECT c.*,u.name author_name,u.avatar author_avatar,NULL AS parent_comment_id,\'\' AS parent_author_name FROM forum_comments c JOIN users u ON u.id=c.author_id WHERE c.post_id=? ORDER BY c.id').all(postId)
   }
-  return db.prepare('SELECT c.*,u.name author_name,u.avatar author_avatar,parent.name parent_author_name FROM forum_comments c JOIN users u ON u.id=c.author_id LEFT JOIN forum_comments parent ON parent.id=c.parent_comment_id WHERE c.post_id=? ORDER BY CASE WHEN c.parent_comment_id IS NULL THEN c.id ELSE c.parent_comment_id END,c.parent_comment_id IS NOT NULL,c.id').all(postId)
+  return db.prepare('SELECT c.*,u.name author_name,u.avatar author_avatar,parent_user.name parent_author_name FROM forum_comments c JOIN users u ON u.id=c.author_id LEFT JOIN forum_comments parent ON parent.id=c.parent_comment_id LEFT JOIN users parent_user ON parent_user.id=parent.author_id WHERE c.post_id=? ORDER BY CASE WHEN c.parent_comment_id IS NULL THEN c.id ELSE c.parent_comment_id END,c.parent_comment_id IS NOT NULL,c.id').all(postId)
 }
 app.get('/api/forum/posts',auth,(req,res)=>{const rows=db.prepare('SELECT p.*,u.name author_name,u.avatar author_avatar,(SELECT COUNT(*) FROM forum_comments c WHERE c.post_id=p.id) comment_count FROM forum_posts p JOIN users u ON u.id=p.author_id ORDER BY p.id DESC').all();res.json(rows.map(row=>forumPost(row,req.user.id)))})
 app.get('/api/forum/posts/:id',auth,(req,res)=>{const post=forumPostRow(req.params.id);if(!post)return res.status(404).json({error:'帖子不存在'});const comments=forumCommentsForPost(post.id);res.json({post:forumPost({...post,comment_count:comments.length},req.user.id),comments})})
