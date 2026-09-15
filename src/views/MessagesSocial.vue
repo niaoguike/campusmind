@@ -12,10 +12,11 @@
         <div v-for="request in requests" :key="request.id" class="request">{{ request.name }}<button @click="accept(request.id)">接受</button></div>
         <p v-if="friendAgentRequests.length" class="label">Agent 访问申请</p>
         <div v-for="request in friendAgentRequests" :key="request.id" class="request">{{ request.name }} 想与您的 Agent 对话 <button @click="decideFriendAgent(request.id, 'approve')">同意</button><button class="text" @click="decideFriendAgent(request.id, 'reject')">拒绝</button></div>
+        <FriendRemarkManager :friends="friends" @updated="load" />
       </aside>
       <section class="chat panel">
         <template v-if="current">
-          <header><div><span class="eyebrow">{{ current.type === 'group' ? 'STUDY GROUP' : 'PRIVATE CHAT' }}</span><h1>{{ current.title }}</h1><p>{{ current.member_count }} 位成员 · {{ current.type === 'group' ? '共同制定复习清单、分工与交流' : '与学习伙伴一对一交流' }}</p></div><div class="header-actions" v-if="current.type === 'group'"><button class="soft" @click="openWorkspace">群任务与复盘</button><button class="soft" @click="openDiscussion">多 Agent 讨论</button><button class="soft" @click="membersDialog = true">成员与 Agent</button><button v-if="isOwner" class="soft" @click="agentRequestsDialog = true">审批 Agent <em v-if="agentRequests.length">{{ agentRequests.length }}</em></button></div></header>
+          <header><div><span class="eyebrow">{{ current.type === 'group' ? 'STUDY GROUP' : 'PRIVATE CHAT' }}</span><h1>{{ current.title }}</h1><p>{{ current.member_count }} 位成员 · {{ current.type === 'group' ? '共同制定复习清单、分工与交流' : '与学习伙伴一对一交流' }}</p></div><div class="header-actions" v-if="current.type === 'group'"><button class="soft" @click="openWorkspace">群任务与复盘</button><button class="soft" @click="openDiscussion">多 Agent 讨论</button><button class="soft" @click="membersDialog = true">成员与 Agent</button><button v-if="isOwner" class="soft" @click="agentRequestsDialog = true">审批 Agent <em v-if="agentRequests.length">{{ agentRequests.length }}</em></button><GroupManagementDialog :conversation="current" :is-owner="isOwner" @updated="load" @removed="handleConversationRemoved" /></div></header>
           <template v-if="current.type === 'group' && myAgentInGroup"><div v-if="agentBarCollapsed" class="agent-restore"><button type="button" aria-label="展开 Agent 偏好" title="展开 Agent 偏好" @click="agentBarCollapsed = false">⌄</button></div><div v-else class="agent-bar"><span class="agent-mark"><AvatarBadge :value="meMember?.agent_avatar || '✦'" :alt="meMember?.agent_name || '我的 Agent'" /></span><b>{{ meMember?.agent_name || '我的 Agent' }}</b><span>已获准进入本群</span><el-switch :model-value="Boolean(meMember?.agent_auto_reply)" @change="toggleMyAgent" active-text="实时参与偏好" inactive-text="仅旁听" /><button class="agent-toggle" type="button" @click="agentBarCollapsed = true">收起</button></div></template>
           <div v-if="activeAgentSession" class="agent-session-bar"><span>✦ {{ activeAgentSession.participants.map(item => item.agent_name).join('、') }} 正在持续协作 · {{ activeAgentSession.turn_count }}/{{ activeAgentSession.max_turns }} 轮</span><button type="button" @click="stopAgentSession(activeAgentSession)">停止协作</button></div>
           <div ref="messageBox" class="messages">
@@ -44,11 +45,13 @@
   </div>
 </template>
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import AppNav from '../components/AppNav.vue'
 import AvatarBadge from '../components/AvatarBadge.vue'
+import FriendRemarkManager from '../components/FriendRemarkManager.vue'
+import GroupManagementDialog from '../components/GroupManagementDialog.vue'
 import { api, post } from '../utils/api'
 import { renderLearningMarkdown, stripAgentDisplayPrefix } from '../utils/learningMarkdown'
 const router = useRouter(); const conversations = ref([]), friends = ref([]), requests = ref([]), friendAgentRequests = ref([]), messages = ref([]), members = ref([]), agentRequests = ref([]); const currentId = ref(null), input = ref(''), createDialog = ref(false), friendDialog = ref(false), membersDialog = ref(false), agentRequestsDialog = ref(false), search = ref(''), found = ref([]), inviteFriendId = ref(null), group = ref({ title: '', member_ids: [] }), messageBox = ref(null), agentBarCollapsed = ref(false); let timer
@@ -56,6 +59,7 @@ const workspaceDialog = ref(false), workspace = ref({ tasks: [], members: [], sh
 const discussionDialog = ref(false), discussionRuns = ref([]), discussionLoading = ref(false), discussionForm = ref({ agent_owner_ids: [], topic: '', mode: 'debate' })
 const agentSessions = ref([])
 const me = computed(() => JSON.parse(localStorage.getItem('user') || '{}')); const current = computed(() => conversations.value.find(x => x.id === currentId.value)); const isOwner = computed(() => current.value?.owner_id === me.value.id); const meMember = computed(() => members.value.find(m => m.id === me.value.id)); const myAgentInGroup = computed(() => Boolean(meMember.value?.agent_in_group)); const groupAgents = computed(() => members.value.filter(m => m.agent_in_group)); const availableFriends = computed(() => friends.value.filter(f => !members.value.some(m => m.id === f.id))); const activeDiscussion = computed(() => discussionRuns.value.find(item => ['queued', 'running'].includes(item.status))); const activeAgentSession = computed(() => agentSessions.value.find(item => ['queued', 'active', 'stopping', 'finalizing'].includes(item.status)))
+watch(friends, list => list.forEach(friend => { friend.real_name = friend.name; if (friend.remark) friend.name = friend.remark }), { deep: false })
 const formatTime = value => {
   if (!value) return ''
   const text = String(value).trim()
@@ -63,6 +67,15 @@ const formatTime = value => {
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 }
 async function load () { [conversations.value, friends.value, requests.value, friendAgentRequests.value] = await Promise.all([api('/conversations'), api('/friends'), api('/friend-requests'), api('/friend-agent/requests')]); if (conversations.value[0] && !currentId.value) await open(conversations.value[0].id) }
+async function handleConversationRemoved () {
+  currentId.value = null
+  messages.value = []
+  members.value = []
+  agentRequests.value = []
+  discussionRuns.value = []
+  agentSessions.value = []
+  try { await load() } catch (error) { ElMessage.error(error.message) }
+}
 async function open (id) { currentId.value = id; agentBarCollapsed.value = false; await refreshCurrent(); const conversation = conversations.value.find(item => item.id === id); if (conversation) conversation.unread_count = 0; await nextTick(); if (messageBox.value) messageBox.value.scrollTop = messageBox.value.scrollHeight }
 async function refreshCurrent () { if (!currentId.value) return; messages.value = await api(`/conversations/${currentId.value}/messages`); if (current.value?.type === 'group') { members.value = await api(`/conversations/${currentId.value}/members`); agentRequests.value = isOwner.value ? await api(`/conversations/${currentId.value}/agent-requests`) : []; await Promise.all([refreshDiscussionRuns(), refreshAgentSessions()]) } else { members.value = []; discussionRuns.value = []; agentSessions.value = [] } }
 async function send () { const content = input.value.trim(); if (!content) return; const targets = current.value?.type === 'group' ? groupAgents.value.filter(agent => content.includes(`@${agent.agent_name}`)) : []; try { await post(`/conversations/${currentId.value}/messages`, { content }); input.value = ''; if (targets.length >= 2 && !activeAgentSession.value) await startAgentSession({ agent_owner_ids: targets.map(agent => agent.id), topic: content }, true); else if (targets.length === 1 && !activeAgentSession.value) await post(`/conversations/${currentId.value}/agent-ask`, { agent_owner_id: targets[0].id, question: content }); await refreshCurrent(); await nextTick(); if (messageBox.value) messageBox.value.scrollTop = messageBox.value.scrollHeight; await load() } catch (e) { ElMessage.error(e.message) } }
