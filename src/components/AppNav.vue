@@ -1,8 +1,8 @@
 <template>
   <header class="app-nav">
-    <router-link to="/dashboard" class="brand"><span>◒</span> CampusMind</router-link>
+    <router-link :to="user.role==='teacher'?'/teacher':'/dashboard'" class="brand"><span>◒</span> CampusMind</router-link>
     <nav>
-      <router-link v-for="item in links" :key="item.to" :to="item.to">{{ item.icon }} {{ item.label }}</router-link>
+      <router-link v-for="item in visibleLinks" :key="item.to" :to="item.to">{{ item.icon }} {{ item.label }}</router-link>
     </nav>
     <div class="nav-user">
       <div class="notice-wrap">
@@ -13,8 +13,9 @@
           <p v-if="!announcements.length" class="notice-empty">暂无公告</p>
         </section>
       </div>
-      <button class="user-name" @click="router.push('/account')">{{ user.name || '同学' }}</button>
+      <button v-if="user.role!=='teacher'" class="user-name" @click="router.push('/account')">{{ user.name || '同学' }}</button>
       <button v-if="user.is_admin" @click="router.push('/admin')">管理后台</button>
+      <button v-if="['teacher','admin'].includes(user.role)" @click="router.push('/teacher')">教师工作台</button>
       <button @click="router.push('/setup-key')">模型设置</button>
       <button class="logout" title="清除当前登录状态并返回登录页" @click="logout">退出登录</button>
     </div>
@@ -27,6 +28,7 @@ import { useRouter } from 'vue-router'
 import { api } from '../utils/api'
 const router = useRouter()
 const user = computed(() => JSON.parse(localStorage.getItem('user') || '{}'))
+const visibleLinks=computed(()=>user.value.role==='teacher'?[{to:'/teacher',label:'教师工作台',icon:'▣'}]:links)
 const announcements = ref([])
 const showAnnouncements = ref(false)
 const links = [

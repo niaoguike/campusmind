@@ -18,6 +18,8 @@ import CourseFolder from '../views/CourseFolder.vue'
 import Quiz from '../views/Quiz.vue'
 import Favorites from '../views/Favorites.vue'
 import AccountCenter from '../views/AccountCenter.vue'
+import { api } from '../utils/api'
+import TeacherConsole from '../views/TeacherConsole.vue'
 
 const requireAuth = (to, from, next) => {
   const token = localStorage.getItem('token')
@@ -26,6 +28,10 @@ const requireAuth = (to, from, next) => {
 const requireAdmin = (to, from, next) => {
   const user = JSON.parse(localStorage.getItem('user') || '{}')
   user.is_admin ? next() : next('/dashboard')
+}
+const requireTeacher = (to, from, next) => {
+  const user = JSON.parse(localStorage.getItem('user') || '{}')
+  ['teacher','admin'].includes(user.role) ? next() : next('/dashboard')
 }
 
 const routes = [
@@ -47,6 +53,7 @@ const routes = [
   { path: '/community', component: ForumHome, beforeEnter: requireAuth },
   { path: '/community/:id', component: ForumPost, beforeEnter: requireAuth },
   { path: '/admin', component: AdminConsole, beforeEnter: requireAdmin }
+  ,{ path: '/teacher', component: TeacherConsole, beforeEnter: requireTeacher }
 ]
 
 const router = createRouter({
@@ -54,4 +61,11 @@ const router = createRouter({
   routes
 })
 
+router.beforeEach(async to => {
+  if(to.path==='/login'||!localStorage.getItem('token'))return
+  try {
+    const user=await api('/user/profile');localStorage.setItem('user',JSON.stringify(user))
+    if(user.role==='teacher'&&!['/teacher','/setup-key'].includes(to.path))return '/teacher'
+  }catch{return '/login'}
+})
 export default router
