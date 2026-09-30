@@ -15,7 +15,6 @@
       </div>
       <button v-if="user.role!=='teacher'" class="user-name" @click="router.push('/account')">{{ user.name || '同学' }}</button>
       <button v-if="user.is_admin" @click="router.push('/admin')">管理后台</button>
-      <button v-if="['teacher','admin'].includes(user.role)" @click="router.push('/teacher')">教师工作台</button>
       <button @click="router.push('/setup-key')">模型设置</button>
       <button class="logout" title="清除当前登录状态并返回登录页" @click="logout">退出登录</button>
     </div>
@@ -26,8 +25,9 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '../utils/api'
+import { sessionUser, clearSession } from '../utils/session'
 const router = useRouter()
-const user = computed(() => JSON.parse(localStorage.getItem('user') || '{}'))
+const user = computed(() => sessionUser.value || {})
 const visibleLinks=computed(()=>user.value.role==='teacher'?[{to:'/teacher',label:'教师工作台',icon:'▣'}]:links)
 const announcements = ref([])
 const showAnnouncements = ref(false)
@@ -40,7 +40,7 @@ const links = [
 ]
 async function loadAnnouncements () { try { announcements.value = await api('/announcements') } catch { announcements.value = [] } }
 function toggleAnnouncements () { showAnnouncements.value = !showAnnouncements.value; if (showAnnouncements.value) loadAnnouncements() }
-function logout () { localStorage.removeItem('token'); localStorage.removeItem('user'); router.push('/login') }
+function logout () { clearSession(); router.push('/login') }
 onMounted(loadAnnouncements)
 </script>
 

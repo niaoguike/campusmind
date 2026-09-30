@@ -27,6 +27,7 @@
         <p class="welcome">WELCOME BACK</p>
         <h2>{{ activeTab === 'register' ? '创建你的 CampusMind 账号' : activeTab === 'reset' ? '重设登录密码' : '欢迎回来' }}</h2>
         <p class="sub">{{ activeTab === 'register' ? '选择学生或教师身份，注册后进入对应工作台。' : activeTab === 'reset' ? '验证已绑定的手机号后，即可设置新密码。' : activeTab === 'sms' ? '使用已绑定手机号的验证码安全登录。' : '使用学号或教师工号登录。' }}</p>
+        <el-alert v-if="loginFailure" :title="loginFailure" type="error" :closable="false" show-icon/>
         <el-tabs v-model="activeTab" stretch class="auth-tabs">
           <el-tab-pane label="账号登录" name="login">
             <el-form :model="loginForm" class="form" @submit.prevent="handleLogin">
@@ -70,11 +71,13 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { setSession, clearSession, homeForUser } from '../utils/session'
 
-const router = useRouter()
+const router = useRouter(),route=useRoute()
+const loginFailure=computed(()=>route.query.reason==='session_expired'?'登录已过期，请重新登录':String(route.query.reason||''))
 const activeTab = ref('login')
 const loading = ref(false)
 const smsSending = ref(false)
@@ -115,11 +118,13 @@ async function sendCode (purpose) {
     startCooldown(purpose)
   } catch { ElMessage.error('无法连接后端服务，请稍后重试') } finally { smsSending.value = false }
 }
-function completeLogin (data) {
+async function completeLogin (data) {
+  if(!data.token||!data.user?.role)throw new Error('登录服务版本不匹配，请刷新后重试')
+  clearSession()
   localStorage.setItem('token', data.token)
-  localStorage.setItem('user', JSON.stringify(data.user))
-  ElMessage.success(`欢迎回来，${data.user.name}`)
-  router.push(data.user.role==='teacher'?'/teacher':'/dashboard')
+  setSession(data.user)
+  await router.replace(homeForUser(data.user))
+  if(router.currentRoute.value.path!=='/login')ElMessage.success(`欢迎回来，${data.user.name}`)
 }
 
 async function handleLogin () {
@@ -130,8 +135,8 @@ async function handleLogin () {
     const response = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ student_id, password }) })
     const data = await response.json()
     if (!response.ok) return ElMessage.error(data.error || '登录失败')
-    completeLogin(data)
-  } catch { ElMessage.error('无法连接后端服务，请确认 server 终端正在运行') } finally { loading.value = false }
+    await completeLogin(data)
+  } catch (error) { ElMessage.error(error.message || '无法连接登录服务，请稍后重试') } finally { loading.value = false }
 }
 
 async function handleSmsLogin () {
@@ -142,7 +147,7 @@ async function handleSmsLogin () {
     const response = await fetch('/api/auth/sms/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone: phone.trim(), code }) })
     const data = await response.json()
     if (!response.ok) return ElMessage.error(data.error || '验证码登录失败')
-    completeLogin(data)
+    await completeLogin(data)
   } catch { ElMessage.error('无法连接后端服务，请确认服务器正常运行') } finally { loading.value = false }
 }
 
@@ -175,8 +180,8 @@ async function handleRegister () {
     const response = await fetch('/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role, teacher_id, student_id, name, phone, college, class: className, password }) })
     const data = await response.json()
     if (!response.ok) return ElMessage.error(data.error || '注册失败')
-    completeLogin(data)
-  } catch { ElMessage.error('无法连接后端服务，请确认 server 终端正在运行') } finally { loading.value = false }
+    await completeLogin(data)
+  } catch (error) { ElMessage.error(error.message || '无法连接登录服务，请稍后重试') } finally { loading.value = false }
 }
 </script>
 

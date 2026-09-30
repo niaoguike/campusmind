@@ -86,6 +86,17 @@ try {
   await call(student,'/register','POST',registration,409)
   const logged=await call(student,'/login','POST',{student_id:registration.teacher_id,password:registration.password})
   assert.equal(logged.user.role,'teacher')
+  // Exercise the actual returned tokens, including the profile read performed by the router.
+  for(const token of [registered.token,logged.token]){
+    for(const endpoint of ['/user/profile','/teacher/dashboard']){
+      const response=await fetch(`http://127.0.0.1:${port}/api${endpoint}`,{headers:{Authorization:`Bearer ${token}`}})
+      assert.equal(response.status,200,endpoint)
+      const data=await response.json()
+      if(endpoint==='/user/profile')assert.equal(data.role,'teacher')
+      else assert.deepEqual(data.courses,[])
+      checks++
+    }
+  }
   const created=await call(registered.user.id,'/teacher/courses','POST',{name:'New teaching class'},201)
   assert.equal((await call(registered.user.id,'/teacher/dashboard')).courses[0].id,created.id)
   await call(teacher,`/teacher/courses/${created.id}/analytics`,'GET',undefined,403)

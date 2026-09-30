@@ -21,6 +21,7 @@
 node --check server/index.js
 npm.cmd run build
 node server/tests/teacher-portal.mjs
+node server/tests/portal-session.mjs
 ```
 
 接口测试覆盖课程分配、管理员保护、越权、草稿可见性、成员加入、提交/评分/重交、私有备注、通知、资料审核、论坛关闭/隐藏、AI 未配置及越权、撤销授权、学生首页。临时库自动清理。
@@ -61,6 +62,12 @@ docker compose cp api:/tmp/campusmind-before-teacher.db "backups/before-teacher-
 
 git pull --ff-only origin "$DEPLOY_BRANCH"
 docker compose up -d --build
+# 本服务器外层 Nginx 的 root 为 /var/www/campusmind，必须同步网页文件。
+STAMP=$(date +%Y%m%d-%H%M%S)
+mkdir -p /var/www/campusmind-backups
+cp -a /var/www/campusmind "/var/www/campusmind-backups/site-$STAMP"
+docker compose cp web:/usr/share/nginx/html/. /var/www/campusmind/
+nginx -t && systemctl reload nginx
 docker compose ps
 docker compose logs --tail=150 api web
 curl --fail --show-error http://127.0.0.1:3001/api/health
@@ -68,6 +75,8 @@ curl --fail --show-error -I http://127.0.0.1:8080/
 ```
 
 保持现有 `data/data.db` 挂载及线上环境配置；不要删除数据库、执行 `docker compose down -v` 或复制开发库覆盖线上数据。备份命令失败时先解决备份，勿继续部署。
+
+学生页面不提供教师工作台入口。教师登录使用服务端角色进入教师端，切换账号时清空旧身份，导航栏响应当前身份变化。身份查询失败时登录页显示错误原因，不再只显示成功后静默退回。若线上仍无法登录，请提供登录页的错误文字，无需发送密码或 token。
 
 ## 设置指定账号为教师并分配课程
 
