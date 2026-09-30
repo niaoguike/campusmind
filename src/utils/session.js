@@ -14,7 +14,7 @@ export function clearSession() {
 export const homeForUser = user => user?.role === 'teacher' ? '/teacher' : '/dashboard'
 
 export function destinationForUser(path, user) {
-  if (user.role === 'teacher') return ['/teacher', '/setup-key'].includes(path) ? null : '/teacher'
+  if (user.role === 'teacher') return ['/teacher', '/setup-key', '/home', '/messages', '/community'].includes(path) || path.startsWith('/community/') || path.startsWith('/friend-agent/') || path.startsWith('/profile/') ? null : '/teacher'
   if (path === '/teacher') return '/dashboard'
   if (path === '/admin' && user.role !== 'admin') return '/dashboard'
   return null

@@ -8,6 +8,7 @@
         <button v-for="item in conversations" :key="item.id" class="conversation" :class="{ active: item.id === currentId }" @click="open(item.id)"><span class="conversation-avatar"><AvatarBadge :value="item.type === 'private' ? item.peer_avatar : ''" :fallback="item.type === 'group' ? '👥' : '🌿'" :alt="item.title" /></span><div><b>{{ item.title }}</b><small>{{ item.last_message || '还没有消息' }}</small></div><em v-if="item.unread_count" class="unread">{{ item.unread_count > 99 ? '99+' : item.unread_count }}</em></button>
         <p class="label">我的学习伙伴</p>
         <div v-for="friend in friends" :key="friend.id" class="friend"><button class="avatar tiny" @click="profile(friend.id)"><AvatarBadge :value="friend.avatar" :alt="friend.name" /></button><span>{{ friend.name }}<small>{{ friend.college }}</small></span><button class="text" @click="privateChat(friend.id)">私聊</button><button class="text" @click="friendAgent(friend.id)">Agent</button></div>
+        <template v-if="me.role === 'student'"><p class="label">教师 Agent</p><div v-for="teacher in teachers" :key="teacher.id" class="friend"><button class="avatar tiny" @click="profile(teacher.id, true)"><AvatarBadge :value="teacher.avatar" :alt="teacher.name" /></button><span>{{ teacher.name }}<small>{{ teacher.college }} · {{ teacher.agent_name || '个人 Agent' }}</small></span><button class="text" @click="friendAgent(teacher.id)">申请对话</button></div><p v-if="!teachers.length" class="muted">暂未找到可联络的教师。</p></template>
         <p v-if="requests.length" class="label">新的好友申请</p>
         <div v-for="request in requests" :key="request.id" class="request">{{ request.name }}<button @click="accept(request.id)">接受</button></div>
         <p v-if="friendAgentRequests.length" class="label">Agent 访问申请</p>
@@ -54,7 +55,7 @@ import FriendRemarkManager from '../components/FriendRemarkManager.vue'
 import GroupManagementDialog from '../components/GroupManagementDialog.vue'
 import { api, post } from '../utils/api'
 import { renderLearningMarkdown, stripAgentDisplayPrefix } from '../utils/learningMarkdown'
-const router = useRouter(); const conversations = ref([]), friends = ref([]), requests = ref([]), friendAgentRequests = ref([]), messages = ref([]), members = ref([]), agentRequests = ref([]); const currentId = ref(null), input = ref(''), createDialog = ref(false), friendDialog = ref(false), membersDialog = ref(false), agentRequestsDialog = ref(false), search = ref(''), found = ref([]), inviteFriendId = ref(null), group = ref({ title: '', member_ids: [] }), messageBox = ref(null), agentBarCollapsed = ref(false); let timer
+const router = useRouter(); const conversations = ref([]), friends = ref([]), teachers = ref([]), requests = ref([]), friendAgentRequests = ref([]), messages = ref([]), members = ref([]), agentRequests = ref([]); const currentId = ref(null), input = ref(''), createDialog = ref(false), friendDialog = ref(false), membersDialog = ref(false), agentRequestsDialog = ref(false), search = ref(''), found = ref([]), inviteFriendId = ref(null), group = ref({ title: '', member_ids: [] }), messageBox = ref(null), agentBarCollapsed = ref(false); let timer
 const workspaceDialog = ref(false), workspace = ref({ tasks: [], members: [], shared_learning: [], latest_summary: null }), workspaceConsent = ref({ share_mastery: false, share_plan_summary: false }), memorySyncMode = ref('ask'), newTask = ref({ title: '', assignee_id: null })
 const discussionDialog = ref(false), discussionRuns = ref([]), discussionLoading = ref(false), discussionForm = ref({ agent_owner_ids: [], topic: '', mode: 'debate' })
 const agentSessions = ref([])
@@ -66,7 +67,7 @@ const formatTime = value => {
   const date = new Date(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text) ? `${text.replace(' ', 'T')}Z` : text)
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 }
-async function load () { [conversations.value, friends.value, requests.value, friendAgentRequests.value] = await Promise.all([api('/conversations'), api('/friends'), api('/friend-requests'), api('/friend-agent/requests')]); if (conversations.value[0] && !currentId.value) await open(conversations.value[0].id) }
+async function load () { const data=await Promise.all([api('/conversations'), api('/friends'), api('/friend-requests'), api('/friend-agent/requests'), me.value.role==='student'?api('/teachers'):Promise.resolve([])]);[conversations.value, friends.value, requests.value, friendAgentRequests.value, teachers.value]=data; if (conversations.value[0] && !currentId.value) await open(conversations.value[0].id) }
 async function handleConversationRemoved () {
   currentId.value = null
   messages.value = []
