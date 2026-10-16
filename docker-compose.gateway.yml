@@ -1,0 +1,42 @@
+# Combine with docker-compose.yml; see deploy/llm-gateway/README.md.
+services:
+  api:
+    environment:
+      LLM_GATEWAY_URL: http://llm-gateway:4000
+      LLM_GATEWAY_MASTER_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY in the gateway env file}
+    depends_on:
+      llm-gateway:
+        condition: service_started
+
+  llm-gateway:
+    image: ${LITELLM_IMAGE:-docker.litellm.ai/berriai/litellm:main-stable}
+    restart: unless-stopped
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    volumes:
+      - ./deploy/llm-gateway/config.yaml:/app/config.yaml:ro
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:?Set LITELLM_SALT_KEY}
+      DATABASE_URL: postgresql://litellm:${LITELLM_POSTGRES_PASSWORD:?Use a generated hex password}@gateway-db:5432/litellm
+    depends_on:
+      gateway-db:
+        condition: service_healthy
+    # No published ports: only the backend can reach this service on the Compose network.
+
+  gateway-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: litellm
+      POSTGRES_DB: litellm
+      POSTGRES_PASSWORD: ${LITELLM_POSTGRES_PASSWORD:?Set LITELLM_POSTGRES_PASSWORD}
+    volumes:
+      - gateway-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  gateway-postgres:

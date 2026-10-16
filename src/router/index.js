@@ -12,39 +12,37 @@ import ForumPost from '../views/ForumPost.vue'
 import MessagesSocial from '../views/MessagesSocial.vue'
 import Profile from '../views/ProfileSettings.vue'
 import FriendAgentChat from '../views/FriendAgentChat.vue'
+import PeerAgentCollaboration from '../views/PeerAgentCollaboration.vue'
 import CourseResource from '../views/CourseResource.vue'
 import CourseFolder from '../views/CourseFolder.vue'
 import Quiz from '../views/Quiz.vue'
 import Favorites from '../views/Favorites.vue'
 import AccountCenter from '../views/AccountCenter.vue'
-
-const requireAuth = (to, from, next) => {
-  const token = localStorage.getItem('token')
-  token ? next() : next('/login')
-}
-const requireAdmin = (to, from, next) => {
-  const user = JSON.parse(localStorage.getItem('user') || '{}')
-  user.is_admin ? next() : next('/dashboard')
-}
+import { api } from '../utils/api'
+import { ElMessage } from 'element-plus'
+import { setSession, clearSession, destinationForUser } from '../utils/session'
+import TeacherConsole from '../views/TeacherConsole.vue'
 
 const routes = [
   { path: '/', redirect: '/dashboard' },
   { path: '/login', component: Login },
-  { path: '/setup-key', component: SetupKey, beforeEnter: requireAuth },
-  { path: '/home', component: Home, beforeEnter: requireAuth },
-  { path: '/dashboard', component: Dashboard, beforeEnter: requireAuth },
-  { path: '/course', component: CourseResource, beforeEnter: requireAuth },
-  { path: '/course/folders/:id', component: CourseFolder, beforeEnter: requireAuth },
-  { path: '/quiz', component: Quiz, beforeEnter: requireAuth },
-  { path: '/favorites', component: Favorites, beforeEnter: requireAuth },
-  { path: '/schedule', component: Schedule, beforeEnter: requireAuth },
-  { path: '/messages', component: MessagesSocial, beforeEnter: requireAuth },
-  { path: '/account', component: AccountCenter, beforeEnter: requireAuth },
-  { path: '/profile/:id', component: Profile, beforeEnter: requireAuth },
-  { path: '/friend-agent/:id', component: FriendAgentChat, beforeEnter: requireAuth },
-  { path: '/community', component: ForumHome, beforeEnter: requireAuth },
-  { path: '/community/:id', component: ForumPost, beforeEnter: requireAuth },
-  { path: '/admin', component: AdminConsole, beforeEnter: requireAdmin }
+  { path: '/setup-key', component: SetupKey },
+  { path: '/home', component: Home },
+  { path: '/dashboard', component: Dashboard },
+  { path: '/course', component: CourseResource },
+  { path: '/course/folders/:id', component: CourseFolder },
+  { path: '/quiz', component: Quiz },
+  { path: '/favorites', component: Favorites },
+  { path: '/schedule', component: Schedule },
+  { path: '/messages', component: MessagesSocial },
+  { path: '/account', component: AccountCenter },
+  { path: '/profile/:id', component: Profile },
+  { path: '/friend-agent/:id', component: FriendAgentChat },
+  { path: '/agent-collaboration/:id', component: PeerAgentCollaboration },
+  { path: '/community', component: ForumHome },
+  { path: '/community/:id', component: ForumPost },
+  { path: '/admin', component: AdminConsole }
+  ,{ path: '/teacher', component: TeacherConsole }
 ]
 
 const router = createRouter({
@@ -52,4 +50,18 @@ const router = createRouter({
   routes
 })
 
+router.beforeEach(async to => {
+  if(to.path==='/login')return
+  if(!localStorage.getItem('token')){clearSession();return '/login'}
+  try {
+    const user=await api('/user/profile',{redirectOnUnauthorized:false,cache:'no-store'})
+    if(!user?.id||!['student','teacher','admin'].includes(user.role))throw new Error('登录身份无效，请重新登录')
+    setSession(user)
+    return destinationForUser(to.path,user)||true
+  }catch(error){
+    ElMessage.error(error.message||'无法读取登录身份，请重新登录')
+    clearSession()
+    return {path:'/login',query:{reason:error.message||'身份校验失败'}}
+  }
+})
 export default router

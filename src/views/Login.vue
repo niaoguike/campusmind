@@ -25,14 +25,15 @@
       <div class="auth-card">
         <div class="mobile-brand"><span>✦</span> CampusMind</div>
         <p class="welcome">WELCOME BACK</p>
-        <h2>{{ activeTab === 'register' ? '创建你的学习空间' : activeTab === 'reset' ? '重设登录密码' : '欢迎回来' }}</h2>
-        <p class="sub">{{ activeTab === 'register' ? '完成身份信息后，即可拥有专属学习 Agent。' : activeTab === 'reset' ? '验证已绑定的手机号后，即可设置新密码。' : activeTab === 'sms' ? '使用已绑定手机号的验证码安全登录。' : '使用学号登录，继续你的学习旅程。' }}</p>
+        <h2>{{ activeTab === 'register' ? '创建你的 CampusMind 账号' : activeTab === 'reset' ? '重设登录密码' : '欢迎回来' }}</h2>
+        <p class="sub">{{ activeTab === 'register' ? '选择学生或教师身份，注册后进入对应工作台。' : activeTab === 'reset' ? '验证已绑定的手机号后，即可设置新密码。' : activeTab === 'sms' ? '使用已绑定手机号的验证码安全登录。' : '使用学号或教师工号登录。' }}</p>
+        <el-alert v-if="loginFailure" :title="loginFailure" type="error" show-icon @close="loginFailure=''"/>
         <el-tabs v-model="activeTab" stretch class="auth-tabs">
-          <el-tab-pane label="学号登录" name="login">
+          <el-tab-pane label="账号登录" name="login">
             <el-form :model="loginForm" class="form" @submit.prevent="handleLogin">
-              <el-form-item label="学号"><el-input v-model="loginForm.student_id" inputmode="numeric" autocomplete="username" placeholder="请输入 8 位学号" size="large" /></el-form-item>
+              <el-form-item label="学号 / 教师工号"><el-input v-model="loginForm.student_id" autocomplete="username" placeholder="请输入学号或教师工号" size="large" /></el-form-item>
               <el-form-item label="密码"><el-input v-model="loginForm.password" type="password" autocomplete="current-password" placeholder="请输入密码" size="large" show-password @keyup.enter="handleLogin" /></el-form-item>
-              <el-button class="main-button" :loading="loading" size="large" native-type="submit">使用学号登录 <span>→</span></el-button>
+              <el-button class="main-button" :loading="loading" size="large" native-type="submit">登录 <span>→</span></el-button>
               <div class="login-links"><button type="button" @click="activeTab = 'sms'">验证码登录</button><button type="button" @click="activeTab = 'reset'">忘记密码？</button></div>
             </el-form>
           </el-tab-pane>
@@ -54,11 +55,12 @@
           </el-tab-pane>
           <el-tab-pane label="注册账号" name="register">
             <el-form :model="regForm" class="form compact" @submit.prevent="handleRegister">
-              <div class="two-col"><el-form-item label="姓名"><el-input v-model="regForm.name" placeholder="真实姓名" /></el-form-item><el-form-item label="8 位学号"><el-input v-model="regForm.student_id" inputmode="numeric" placeholder="例如 55240101" /></el-form-item></div>
+              <el-form-item label="注册身份"><el-radio-group v-model="regForm.role"><el-radio-button value="student">学生</el-radio-button><el-radio-button value="teacher">教师</el-radio-button></el-radio-group></el-form-item>
+              <div class="two-col"><el-form-item label="姓名"><el-input v-model="regForm.name" placeholder="真实姓名" /></el-form-item><el-form-item v-if="regForm.role==='student'" label="8 位学号"><el-input v-model="regForm.student_id" inputmode="numeric" placeholder="例如 55240101" /></el-form-item><el-form-item v-else label="教师工号"><el-input v-model="regForm.teacher_id" maxlength="32" placeholder="请输入教师工号" /></el-form-item></div>
               <el-form-item label="手机号"><el-input v-model="regForm.phone" placeholder="用于联系" /></el-form-item>
-              <div class="two-col"><el-form-item label="学院"><el-select v-model="regForm.college" filterable placeholder="选择或搜索学院"><el-option v-for="college in colleges" :key="college" :label="college" :value="college"/></el-select></el-form-item><el-form-item label="班级"><el-input v-model="regForm.class" placeholder="如：552413" /></el-form-item></div>
+              <div class="two-col"><el-form-item label="所属学院"><el-select v-model="regForm.college" filterable allow-create default-first-option placeholder="选择或搜索学院"><el-option v-for="college in colleges" :key="college" :label="college" :value="college"/></el-select></el-form-item><el-form-item v-if="regForm.role==='student'" label="班级"><el-input v-model="regForm.class" placeholder="如：552413" /></el-form-item></div>
               <el-form-item label="设置密码"><el-input v-model="regForm.password" type="password" autocomplete="new-password" placeholder="至少 6 位" show-password /></el-form-item>
-              <el-button class="main-button" :loading="loading" size="large" native-type="submit">创建学习账号 <span>→</span></el-button>
+              <el-button class="main-button" :loading="loading" size="large" native-type="submit">{{ regForm.role==='teacher'?'注册并进入教师端':'注册并进入学生端' }} <span>→</span></el-button>
             </el-form>
           </el-tab-pane>
         </el-tabs>
@@ -70,10 +72,14 @@
 
 <script setup>
 import { onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { setSession, clearSession, homeForUser } from '../utils/session'
 
-const router = useRouter()
+const router = useRouter(),route=useRoute()
+// A redirect can carry the failure of a previous session.  Keep it dismissible
+// and clear it as soon as the user starts a new authentication attempt.
+const loginFailure=ref(route.query.reason==='session_expired'?'登录已过期，请重新登录':String(route.query.reason||''))
 const activeTab = ref('login')
 const loading = ref(false)
 const smsSending = ref(false)
@@ -81,7 +87,7 @@ const loginForm = ref({ student_id: '', password: '' })
 const smsLoginForm = ref({ phone: '', code: '' })
 const resetForm = ref({ phone: '', code: '', password: '', confirmPassword: '' })
 const cooldowns = ref({ login: 0, reset: 0 })
-const regForm = ref({ student_id: '', name: '', phone: '', college: '', class: '', password: '' })
+const regForm = ref({ role:'student', teacher_id:'', student_id: '', name: '', phone: '', college: '', class: '', password: '' })
 const colleges = ['哲学社会学院','文学院','新闻与传播学院','经济学院','法学院','商学与管理学院','数学学院','物理学院','化学学院','计算机科学与技术学院','软件学院','人工智能学院','电子科学与工程学院','通信工程学院','机械与航空航天工程学院','汽车工程学院','材料科学与工程学院','地球科学学院','建设工程学院','公共卫生学院','药学院','护理学院','基础医学院','动物医学学院','植物科学学院']
 const announcements = ref([])
 
@@ -114,27 +120,30 @@ async function sendCode (purpose) {
     startCooldown(purpose)
   } catch { ElMessage.error('无法连接后端服务，请稍后重试') } finally { smsSending.value = false }
 }
-function completeLogin (data) {
+async function completeLogin (data) {
+  if(!data.token||!data.user?.role)throw new Error('登录服务版本不匹配，请刷新后重试')
+  clearSession()
   localStorage.setItem('token', data.token)
-  localStorage.setItem('user', JSON.stringify(data.user))
-  ElMessage.success(`欢迎回来，${data.user.name}`)
-  router.push('/dashboard')
+  setSession(data.user)
+  await router.replace(homeForUser(data.user))
+  if(router.currentRoute.value.path!=='/login')ElMessage.success(`欢迎回来，${data.user.name}`)
 }
 
 async function handleLogin () {
+  loginFailure.value = ''
   const { student_id, password } = loginForm.value
-  if (!student_id || !password) return ElMessage.warning('请填写学号和密码')
-  if (!/^\d{8}$/.test(student_id)) return ElMessage.warning('请输入 8 位数字学号')
+  if (!student_id.trim() || !password) return ElMessage.warning('请填写学号或教师工号和密码')
   loading.value = true
   try {
     const response = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ student_id, password }) })
     const data = await response.json()
     if (!response.ok) return ElMessage.error(data.error || '登录失败')
-    completeLogin(data)
-  } catch { ElMessage.error('无法连接后端服务，请确认 server 终端正在运行') } finally { loading.value = false }
+    await completeLogin(data)
+  } catch (error) { ElMessage.error(error.message || '无法连接登录服务，请稍后重试') } finally { loading.value = false }
 }
 
 async function handleSmsLogin () {
+  loginFailure.value = ''
   const { phone, code } = smsLoginForm.value
   if (!validPhone(phone) || !/^\d{6}$/.test(code)) return ElMessage.warning('请输入手机号和 6 位验证码')
   loading.value = true
@@ -142,7 +151,7 @@ async function handleSmsLogin () {
     const response = await fetch('/api/auth/sms/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone: phone.trim(), code }) })
     const data = await response.json()
     if (!response.ok) return ElMessage.error(data.error || '验证码登录失败')
-    completeLogin(data)
+    await completeLogin(data)
   } catch { ElMessage.error('无法连接后端服务，请确认服务器正常运行') } finally { loading.value = false }
 }
 
@@ -163,19 +172,21 @@ async function handleResetPassword () {
 }
 
 async function handleRegister () {
-  const { student_id, name, phone, college, class: className, password } = regForm.value
-  if (![student_id, name, phone, college, className, password].every(Boolean)) return ElMessage.warning('请填写所有必填信息')
-  if (!/^\d{8}$/.test(student_id)) return ElMessage.warning('学号必须为 8 位数字')
+  loginFailure.value = ''
+  const { role, teacher_id, student_id, name, phone, college, class: className, password } = regForm.value
+  const account = role==='teacher'?teacher_id.trim():student_id.trim()
+  if (![account, name.trim(), phone, college.trim(), password].every(Boolean)||(role==='student'&&!className.trim())) return ElMessage.warning('请填写所有必填信息')
+  if (role==='student'&&!/^\d{8}$/.test(account)) return ElMessage.warning('学号必须为 8 位数字')
+  if(role==='teacher'&&!/^[A-Za-z0-9_-]{2,32}$/.test(account))return ElMessage.warning('教师工号需为2至32位字母、数字、下划线或短横线')
   if (!validPhone(phone)) return ElMessage.warning('请输入正确的 11 位中国大陆手机号')
   if (password.length < 6) return ElMessage.warning('密码至少需要 6 位')
   loading.value = true
   try {
-    const response = await fetch('/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ student_id, name, phone, college, class: className, password }) })
+    const response = await fetch('/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role, teacher_id, student_id, name, phone, college, class: className, password }) })
     const data = await response.json()
     if (!response.ok) return ElMessage.error(data.error || '注册失败')
-    ElMessage.success('注册成功，请使用学号登录')
-    activeTab.value = 'login'; loginForm.value.student_id = student_id
-  } catch { ElMessage.error('无法连接后端服务，请确认 server 终端正在运行') } finally { loading.value = false }
+    await completeLogin(data)
+  } catch (error) { ElMessage.error(error.message || '无法连接登录服务，请稍后重试') } finally { loading.value = false }
 }
 </script>
 

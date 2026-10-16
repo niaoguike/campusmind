@@ -19,6 +19,7 @@
         </button>
       </section>
 
+      <CourseTeaching v-if="selected" :course-id="selected"/>
       <section class="toolbar panel">
         <el-input v-model="query" placeholder="搜索标题、标签或文件名" clearable @input="loadResources" />
         <span>{{ resources.length }} 条结果</span>
@@ -30,7 +31,7 @@
         <article v-for="resource in group.folder ? [] : group.items" :key="resource.id" class="resource-card">
           <div class="file">{{ icon(resource.type) }}</div>
           <div class="resource-main">
-            <span>{{ resource.course_name }} · {{ resource.type }} <b v-if="resource.is_pinned" class="pinned">置顶</b></span>
+            <span>{{ resource.course_name }} · {{ resource.type }} <el-tag v-if="resource.review_status" size="small">{{ ({approved:"审核通过",pending:"待审核",rejected:"审核未通过"})[resource.review_status] }}</el-tag> <b v-if="resource.is_pinned" class="pinned">置顶</b></span>
             <h2>{{ resource.title }}</h2>
             <small v-if="resource.relative_path" class="folder-path">📂 {{ resource.relative_path }}</small>
             <p>{{ resource.description || '发布者暂未填写说明。' }}</p>
@@ -91,6 +92,7 @@ import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
 import AppNav from '../components/AppNav.vue'
+import CourseTeaching from '../components/CourseTeaching.vue'
 import { api } from '../utils/api'
 
 const courses = ref([])
