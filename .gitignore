@@ -3,6 +3,7 @@ dist/
 dist-check/
 .env
 server/.env
+deploy/llm-gateway/.env
 *.log
 server/server.err
 .vscode/

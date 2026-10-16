@@ -10,7 +10,7 @@ import { promises as fs } from 'fs'
 import os from 'os'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
-import { ChatOpenAI } from '@langchain/openai'
+import { createLlmService, SUPPORTED_MODELS } from './services/llmClient.js'
 import multer from 'multer'
 import XLSX from 'xlsx'
 import { extractResourceChunks, searchKnowledgeChunks } from './services/resourceRag.js'
@@ -34,7 +34,7 @@ dotenv.config()
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const JWT_SECRET = process.env.JWT_SECRET || 'change-this-in-production'
 const KEY_SECRET = process.env.LLM_CONFIG_ENCRYPTION_KEY || JWT_SECRET
-const SUPPORTED_DEEPSEEK_MODELS = new Set(['deepseek-v4-flash', 'deepseek-v4-pro'])
+const SUPPORTED_DEEPSEEK_MODELS = new Set(SUPPORTED_MODELS)
 const SMS_CONFIG = {
   accessKeyId: (process.env.ALIBABA_CLOUD_ACCESS_KEY_ID || '').trim(),
   accessKeySecret: (process.env.ALIBABA_CLOUD_ACCESS_KEY_SECRET || '').trim(),
@@ -375,6 +375,7 @@ function consumeVerification (phone, purpose, code) {
 function keyMaterial() { return crypto.createHash('sha256').update(KEY_SECRET).digest() }
 function encryptSecret(value) { const iv=crypto.randomBytes(12), cipher=crypto.createCipheriv('aes-256-gcm',keyMaterial(),iv), data=Buffer.concat([cipher.update(value,'utf8'),cipher.final()]), tag=cipher.getAuthTag(); return `v1:${iv.toString('base64')}:${tag.toString('base64')}:${data.toString('base64')}` }
 function decryptSecret(value) { if (!value || !value.startsWith('v1:')) return value||''; const [,iv,tag,data]=value.split(':'), decipher=crypto.createDecipheriv('aes-256-gcm',keyMaterial(),Buffer.from(iv,'base64')); decipher.setAuthTag(Buffer.from(tag,'base64')); return Buffer.concat([decipher.update(Buffer.from(data,'base64')),decipher.final()]).toString('utf8') }
+const llm = createLlmService({ db, encryptSecret, decryptSecret })
 function auth(req,res,next) { const header=req.headers.authorization||''; if(!header.startsWith('Bearer ')) return res.status(401).json({error:'请先登录'}); try{req.user=jwt.verify(header.slice(7),JWT_SECRET);const account=db.prepare('SELECT account_status FROM users WHERE id=?').get(req.user.id);if(!account)return res.status(401).json({error:'账户不存在或已注销'});if(account.account_status&&account.account_status!=='active')return res.status(403).json({error:account.account_status==='disabled'?'该账户已被停用，请联系平台管理员':'该账户当前无法使用'});if(userOf(req.user.id).role==='teacher'){const route=req.originalUrl.split('?')[0];const social=/^\/api\/(users(?:\/|$)|friends(?:\/|$)|friend-requests(?:\/|$)|friend-agent(?:s)?(?:\/|$)|conversations(?:\/|$)|forum(?:\/|$)|agent(?:\/|$))/.test(route);const allowed=/^\/api\/teacher(?:\/|$)/.test(route)||/^\/api\/user\/(profile|apikey|avatar)$/.test(route)||route==='/api/courses'||/^\/api\/courses\/\d+\/(announcements|teacher-tasks|membership)$/.test(route)||social;if(!allowed)return res.status(403).json({error:'教师账号仅可访问授权教学数据或本人社交通信'});const match=route.match(/^\/api\/courses\/(\d+)\//);if(match&&!managesCourse(req.user.id,Number(match[1])))return res.status(403).json({error:'课程未授权'});}next()}catch{return res.status(401).json({error:'登录已过期，请重新登录'})} }
 const userOf=id=>db.prepare('SELECT * FROM users WHERE id=?').get(id)
 const publicUser=row=>row&&({id:row.id,student_id:row.student_id,teacher_id:row.role==='teacher'?row.student_id:null,name:row.name,college:row.college,class:row.class,avatar:row.avatar||'🌿',bio:row.bio||'',agent_name:row.agent_name||'知行',agent_avatar:row.agent_avatar||'✦',model_type:row.model_type,hasApiKey:!!row.api_key,is_admin:row.role==='admin',role:row.role||'student',account_status:row.account_status||'active'})
@@ -517,7 +518,7 @@ async function sendGroupAgentMessage ({ conversation, ownerId, content, kind='',
         let title='群学习成果'
         if(['ppt','word','pdf'].includes(mode)){
           try {
-            const plan=await designLearningArtifact({apiKey:decryptSecret(billingUser.api_key),model:SUPPORTED_DEEPSEEK_MODELS.has(billingUser.model_type)?billingUser.model_type:'deepseek-v4-flash',mode,pages:mode==='ppt'?8:7,style:'课程复习',focus:'根据本次群聊讨论生成，适合小组共享',conversation:`群主题：${question}\n\nAgent 回复：${artifactContent}`})
+            const plan=await designLearningArtifact({requestChat:payload=>llm.sendChat(billingUser,payload),model:SUPPORTED_DEEPSEEK_MODELS.has(billingUser.model_type)?billingUser.model_type:'deepseek-v4-flash',mode,pages:mode==='ppt'?8:7,style:'课程复习',focus:'根据本次群聊讨论生成，适合小组共享',conversation:`群主题：${question}\n\nAgent 回复：${artifactContent}`})
             title=plan.title
             artifactContent=artifactPlanMarkdown(plan,mode)
           } catch (planError) {
@@ -1755,8 +1756,7 @@ app.delete('/api/forum/posts/:id',auth,(req,res)=>{const post=db.prepare('SELECT
 app.delete('/api/forum/comments/:id',auth,(req,res)=>{const comment=db.prepare('SELECT * FROM forum_comments WHERE id=?').get(req.params.id);if(!comment)return res.status(404).json({error:'评论不存在'});if(comment.author_id!==req.user.id&&!isAdmin(req.user.id))return res.status(403).json({error:'只能删除自己的评论'});db.prepare('DELETE FROM forum_comments WHERE id=?').run(comment.id);res.json({message:'评论已删除'})})
 
 function quizModel (user, temperature = 0.3) {
-  const modelName=SUPPORTED_DEEPSEEK_MODELS.has(user.model_type)?user.model_type:'deepseek-v4-flash'
-  return new ChatOpenAI({model:modelName,apiKey:decryptSecret(user.api_key),temperature,configuration:{baseURL:'https://api.deepseek.com'}})
+  return llm.createModel(user, temperature)
 }
 function jsonFromModel (message) {
   const text=plainAnswer(message).replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'').trim()
@@ -1971,13 +1971,7 @@ async function createPersonalLearningRun (user, content) {
   const search = createCourseResourceSearchTool({ db, searchKnowledgeChunks })
   const { snapshot, remember } = createLearningStateTools({ db, userId, now })
   const createPlanDraft = createPlanDraftTool({ db, userId, now })
-  const modelName = SUPPORTED_DEEPSEEK_MODELS.has(user.model_type) ? user.model_type : 'deepseek-v4-flash'
-  const model = new ChatOpenAI({
-    model: modelName,
-    apiKey: decryptSecret(user.api_key),
-    temperature: 0.4,
-    configuration: { baseURL: 'https://api.deepseek.com' }
-  })
+  const model = llm.createModel(user, 0.4)
 
   return createLearningCoordinator({
     content,
@@ -2059,7 +2053,7 @@ app.post('/api/agent/threads/:id/generate-artifact',auth,async(req,res)=>{
   if(!conversation.trim())return res.status(400).json({error:'请先在当前对话中获得一些学习内容，再生成专业成果'})
   try {
     const modelName=SUPPORTED_DEEPSEEK_MODELS.has(user.model_type)?user.model_type:'deepseek-v4-flash'
-    const plan=await designLearningArtifact({apiKey:decryptSecret(user.api_key),model:modelName,mode,pages:req.body.pages,style:req.body.style,focus:req.body.focus,conversation})
+    const plan=await designLearningArtifact({requestChat:payload=>llm.sendChat(user,payload),model:modelName,mode,pages:req.body.pages,style:req.body.style,focus:req.body.focus,conversation})
     const attachment=await saveAgentExport(threadId,user.id,mode,plan.title,artifactPlanMarkdown(plan,mode))
     const label={ppt:'PPT',word:'Word 学习报告',pdf:'PDF 学习报告'}[mode]
     const message=`已由成果生成 Agent 重新设计并生成 ${label}：${plan.title}（${plan.style}，${plan.totalPages} 页/段）。`
@@ -2363,7 +2357,7 @@ app.post('/api/quizzes/:quizId/questions/:questionId/favorite',auth,(req,res)=>{
 app.get('/api/favorites',auth,(req,res)=>{const courseId=Number(req.query.course_id||0);let sql='SELECT f.*,c.name course_name,c.color course_color FROM question_favorites f JOIN courses c ON c.id=f.course_id WHERE f.user_id=?',values=[req.user.id];if(courseId){sql+=' AND f.course_id=?';values.push(courseId)}sql+=' ORDER BY f.id DESC';const rows=db.prepare(sql).all(...values).map(row=>({...row,question:JSON.parse(row.question_json)}));res.json(rows)})
 app.delete('/api/favorites/:id',auth,(req,res)=>{const result=db.prepare('DELETE FROM question_favorites WHERE id=? AND user_id=?').run(req.params.id,req.user.id);if(!result.changes)return res.status(404).json({error:'收藏题目不存在'});res.json({message:'已取消收藏'})})
 function plainAnswer (message) { return typeof message?.content==='string' ? message.content.trim() : String(message?.content||'').trim() }
-async function callExternalAgent (personaOwner, systemPrompt, history, billingUser=personaOwner) { if(!billingUser?.api_key)throw new Error('NO_API_KEY');const modelName=SUPPORTED_DEEPSEEK_MODELS.has(billingUser.model_type)?billingUser.model_type:'deepseek-v4-flash';const model=new ChatOpenAI({model:modelName,apiKey:decryptSecret(billingUser.api_key),temperature:0.35,configuration:{baseURL:'https://api.deepseek.com'}});const result=await model.invoke([{role:'system',content:systemPrompt},...history]);return plainAnswer(result) }
+async function callExternalAgent (personaOwner, systemPrompt, history, billingUser=personaOwner) { const model=llm.createModel(billingUser,0.35);const result=await model.invoke([{role:'system',content:systemPrompt},...history]);return plainAnswer(result) }
 async function replyFromGroupAgent (conversation, ownerId, question, explicit, billingUserId=ownerId) {
   const owner=userOf(ownerId),billingUser=userOf(billingUserId)
   if(!owner||!billingUser?.api_key)throw new Error('NO_API_KEY')

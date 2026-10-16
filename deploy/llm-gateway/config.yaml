@@ -1,0 +1,26 @@
+model_list:
+  - model_name: deepseek-v4-flash
+    litellm_params:
+      model: openai/deepseek-v4-flash
+      api_base: https://api.deepseek.com
+      # A real provider credential is supplied per request by the backend.
+      # Never configure a shared paid key as a fallback for user-owned billing.
+      api_key: campusmind-byok-required
+  - model_name: deepseek-v4-pro
+    litellm_params:
+      model: openai/deepseek-v4-pro
+      api_base: https://api.deepseek.com
+      api_key: campusmind-byok-required
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  # api_key in the request body overrides the deployment key. Endpoint overrides
+  # remain disabled: the application cannot select an arbitrary upstream URL.
+  allow_client_side_credentials: false
+
+litellm_settings:
+  turn_off_message_logging: true
+  set_verbose: false
+  cache: false
+  num_retries: 0

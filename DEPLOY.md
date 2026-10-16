@@ -1,5 +1,7 @@
 # CampusMind first deployment (Ubuntu ECS)
 
+Optional per-user LiteLLM gateway deployment: [gateway guide](deploy/llm-gateway/README.md). Use its Compose overlay commands to enable the gateway; the base commands below keep direct DeepSeek access.
+
 This first deployment uses the ECS public IP over HTTP. Add a domain and HTTPS only after the IP deployment works.
 
 ## 1. Security group

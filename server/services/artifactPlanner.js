@@ -27,7 +27,7 @@ function normalizeSlides (items, count) {
   return result
 }
 
-export async function designLearningArtifact ({ apiKey, model, mode, pages, style, focus, conversation }) {
+export async function designLearningArtifact ({ requestChat, model, mode, pages, style, focus, conversation }) {
   const totalPages = clamp(pages, 4, 16, 8)
   const bodyPages = mode === 'ppt' ? Math.max(3, totalPages - 1) : Math.max(3, totalPages - 2)
   const selectedStyle = ['课程复习', '课堂汇报', '大创答辩'].includes(style) ? style : '课程复习'
@@ -44,23 +44,19 @@ JSON 格式：
 
 对话内容：
 ${source}`
-  const response = await fetch('https://api.deepseek.com/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      model,
-      temperature: 0.25,
-      max_tokens: 5000,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: '你是 CampusMind 成果生成 Agent。必须输出一个合法 JSON 对象，严格遵守用户给定的 JSON 格式。' },
-        { role: 'user', content: prompt }
-      ]
-    })
+  const response = await requestChat({
+    model,
+    temperature: 0.25,
+    max_tokens: 5000,
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system', content: '你是 CampusMind 成果生成 Agent。必须输出一个合法 JSON 对象，严格遵守用户给定的 JSON 格式。' },
+      { role: 'user', content: prompt }
+    ]
   })
   if (!response.ok) {
     const detail = await response.text().catch(() => '')
-    const error = new Error(`DeepSeek 成果设计请求失败（${response.status}）：${detail.slice(0, 180)}`)
+    const error = new Error(`模型成果设计请求失败（${response.status}）：${detail.slice(0, 180)}`)
     error.status = response.status
     throw error
   }
