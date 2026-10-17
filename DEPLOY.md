@@ -1,50 +1,51 @@
-# CampusMind first deployment (Ubuntu ECS)
+# CampusMind deployment on Ubuntu ECS
 
-Optional per-user LiteLLM gateway deployment: [gateway guide](deploy/llm-gateway/README.md). Use its Compose overlay commands to enable the gateway; the base commands below keep direct DeepSeek access.
+The application uses one PostgreSQL database with pgvector for business data, messages, memory jobs, profiles and conversation summaries. Redis caches recent chat context and message lists; see [the cache guide](deploy/redis/README.md). The optional LiteLLM gateway has its own internal state database; see [the gateway guide](deploy/llm-gateway/README.md).
 
-This first deployment uses the ECS public IP over HTTP. Add a domain and HTTPS only after the IP deployment works.
+## First deployment
 
-## 1. Security group
-
-Allow inbound TCP 80 from the public Internet. Keep TCP 22 restricted to your own public IP. Do not expose 3001, 8080, SQLite, or Redis.
-
-## 2. First server setup
+Clone the project into `/opt/campusmind`, install Docker Compose and Nginx, then create the configuration files without replacing existing ones:
 
 ```bash
-sudo mkdir -p /opt/campusmind
-sudo chown -R $USER:$USER /opt/campusmind
-cd /opt
-git clone https://gitee.com/wensr_517/campusmind.git campusmind
 cd /opt/campusmind
-cp server/.env.example server/.env
-nano server/.env
+cp -n server/.env.example server/.env
+cp -n deploy/postgres/.env.example deploy/postgres/.env
+cp -n deploy/redis/.env.example deploy/redis/.env
 ```
 
-In `server/.env`, replace both placeholder secrets with different long random values. Do not put a student API key in this file.
+Set `JWT_SECRET`, `LLM_CONFIG_ENCRYPTION_KEY`, `POSTGRES_PASSWORD` and `REDIS_PASSWORD`. Use generated hexadecimal database/cache passwords for the Compose URL templates. For an upgrade, preserve the existing application secrets so saved model keys remain decryptable. Configure the optional embedding service in `server/.env` if cross-session semantic memory is needed.
 
 ```bash
 chmod +x deploy/server-setup.sh
 ./deploy/server-setup.sh
 ```
 
-Then visit `http://123.56.248.129`.
+The setup script installs the supplied Nginx configuration and starts the API, web frontend, PostgreSQL and Redis. Allow public HTTP/HTTPS access through Nginx; keep database, cache, API and frontend container ports private. Add a domain and HTTPS before using real user credentials over the public Internet.
 
-## 3. Update later
+## Migrating an existing installation
+
+Before starting the new API, stop writes to the old application. Back up the old SQLite database, uploads and original encryption configuration. Run the importer from a development installation with the SQLite import dependency installed, or migrate locally and transfer the PostgreSQL dump to the server.
+
+See [the PostgreSQL migration guide](deploy/postgres/README.md) for the read-only backup, empty-target import, sequence reset and verification process. Do not initialize an empty application with demo seed data and then attempt to merge the old database into it; the importer deliberately rejects a populated target.
+
+Uploads are stored separately from database rows. Copy existing uploads into the application's upload volume before making the new installation live. Verify registered accounts, resources, permissions and model-key decryption before switching traffic.
+
+## Updates and checks
 
 ```bash
 cd /opt/campusmind
 git pull
-docker compose up -d --build
-```
-
-## 4. Check and troubleshoot
-
-```bash
-docker compose ps
-docker compose logs -f api
-docker compose logs -f web
+docker compose --env-file deploy/postgres/.env --env-file deploy/redis/.env up -d --build
+docker compose --env-file deploy/postgres/.env --env-file deploy/redis/.env ps
+docker compose --env-file deploy/postgres/.env --env-file deploy/redis/.env logs -f api
 curl http://127.0.0.1:3001/api/health
 sudo nginx -t
 ```
 
-The SQLite database is persisted at `/opt/campusmind/data/data.db`. Back up that file regularly before updating the server.
+The health endpoint reports `database: postgresql`. API startup applies versioned SQL migrations before accepting requests. Back up PostgreSQL and uploads before upgrading. Existing migration files are checksum-protected; add a new migration rather than editing an applied file.
+
+## Backups and rollback
+
+Use `pg_dump`/`pg_restore` for the `campusmind` database and separately back up the upload volume. Keep the matching `LLM_CONFIG_ENCRYPTION_KEY`. The import command retains its SQLite snapshot under `data/backups` and never removes the source file.
+
+Rollback requires the previous code and its matching database snapshot; do not point the old SQLite application at PostgreSQL or expect new PostgreSQL writes to appear in the retained SQLite file.

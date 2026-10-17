@@ -1,0 +1,3 @@
+# Deprecated compatibility overlay: memory now shares the main PostgreSQL database.
+# Use docker compose --env-file deploy/postgres/.env up -d --build instead.
+services: {}

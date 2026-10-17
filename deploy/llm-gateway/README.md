@@ -2,13 +2,13 @@
 
 调用链：浏览器 → Nginx → CampusMind 后端 → LiteLLM → 用户自己的 DeepSeek 账户。
 
-用户继续在现有模型设置页填写自己的 DeepSeek API Key。启用网关后，后端为每个付费用户惰性创建独立的 LiteLLM 虚拟 Key，加密保存在 SQLite 的 `llm_gateway_keys` 表中。真实 DeepSeek Key 仍加密保存在原账户中，仅在请求时解密，经内网在 JSON 的 `api_key` 字段传给 LiteLLM；`Authorization` 使用用户对应的网关虚拟 Key，不使用管理员 Key。管理员 Key 仅用于创建虚拟 Key，不进入模型推理请求或浏览器。
+用户继续在现有模型设置页填写自己的 DeepSeek API Key。启用网关后，后端为每个付费用户惰性创建独立的 LiteLLM 虚拟 Key，加密保存在 应用 PostgreSQL 的 `llm_gateway_keys` 表中。真实 DeepSeek Key 仍加密保存在原账户中，仅在请求时解密，经内网在 JSON 的 `api_key` 字段传给 LiteLLM；`Authorization` 使用用户对应的网关虚拟 Key，不使用管理员 Key。管理员 Key 仅用于创建虚拟 Key，不进入模型推理请求或浏览器。
 
 同伴、群聊的 Agent 所有者和付费用户可以不同；新入口沿用原调用链提供的 billingUser。不配置共享上游密钥，不自动回退到其他账户，不启用跨用户语义缓存。
 
 ## 启动
 
-在项目根目录操作，先按照 DEPLOY.md 配置 `server/.env` 和原应用数据卷。
+在项目根目录操作，先按照 DEPLOY.md 配置 `server/.env`、`deploy/postgres/.env`、`deploy/redis/.env` 和应用数据卷。
 
 1. 复制 `deploy/llm-gateway/.env.example` 为同目录的 `.env`。
 2. 用密码管理器，或重复执行下面的命令生成三个不同值，分别填写 master key、salt key、PostgreSQL 密码；前两项加 `sk-` 前缀。
@@ -20,19 +20,19 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 3. 确认 Docker 正在运行，然后执行：
 
 ```bash
-docker compose --env-file deploy/llm-gateway/.env -f docker-compose.yml -f docker-compose.gateway.yml config --quiet
-docker compose --env-file deploy/llm-gateway/.env -f docker-compose.yml -f docker-compose.gateway.yml up -d --build
-docker compose --env-file deploy/llm-gateway/.env -f docker-compose.yml -f docker-compose.gateway.yml ps
+docker compose --env-file deploy/postgres/.env --env-file deploy/redis/.env --env-file deploy/llm-gateway/.env -f docker-compose.yml -f docker-compose.gateway.yml config --quiet
+docker compose --env-file deploy/postgres/.env --env-file deploy/redis/.env --env-file deploy/llm-gateway/.env -f docker-compose.yml -f docker-compose.gateway.yml up -d --build
+docker compose --env-file deploy/postgres/.env --env-file deploy/redis/.env --env-file deploy/llm-gateway/.env -f docker-compose.yml -f docker-compose.gateway.yml ps
 ```
 
 更新时也使用同一条带两个 `-f` 的命令。原 `deploy/server-setup.sh` 只启动基础应用，不会启用网关。
 
-网关和 PostgreSQL 不发布宿主机端口。`main-stable` 用于首次验证，验证通过后将 `LITELLM_IMAGE` 固定到实际测试过的版本标签或镜像 digest。升级镜像也需要重新跑真实网关验收。
+网关及其内部数据库不发布宿主机端口；应用 PostgreSQL 仅绑定宿主机 `127.0.0.1`。`main-stable` 用于首次验证，验证通过后将 `LITELLM_IMAGE` 固定到实际测试过的版本标签或镜像 digest。升级镜像也需要重新跑真实网关验收。
 
 ## 验收
 
 1. 两个测试账户分别绑定自己的有效 DeepSeek Key，各发送一个问题。
-2. 通过 LiteLLM 管理接口或 PostgreSQL 检查，应出现 `campusmind-user-<id>` 的不同 key_alias，允许的模型只有 Flash/Pro；SQLite 中应有不同的加密网关凭证。不要把完整凭证打印到日志。
+2. 通过 LiteLLM 管理接口或 PostgreSQL 检查，应出现 `campusmind-user-<id>` 的不同 key_alias，允许的模型只有 Flash/Pro；应用 PostgreSQL 中应有不同的加密网关凭证。不要把完整凭证打印到日志。
 3. 检查网关用量记录中两把虚拟 Key 分别累积 Token；供应商账单应分别落在这两个用户的 DeepSeek 账户。
 4. 提问需要查询课表/资料的问题，确认 Function Calling 的工具请求、工具结果回传和最终回答均正常。再验证出题、批改、复盘、个人/群聊成果生成及同伴协作。
 5. 第二个测试账户使用无效 DeepSeek Key 时应失败，不得成功消耗第一个账户的余额。临时降低新虚拟 Key 的 RPM/TPM，验证限流；一次多步 Agent 运行可能包含多次模型请求。
@@ -47,13 +47,13 @@ docker compose --env-file deploy/llm-gateway/.env -f docker-compose.yml -f docke
 - 网关必须完整支持 tools/tool_calls、JSON 输出和所选模型。用户聊天与成果生成共用同一传输入口。
 - 应用只向固定 DeepSeek 地址发送上游请求；不接受用户提供的 api_base。`api_key` 的逐请求覆盖使用 LiteLLM 官方 BYOK 机制，当前配置禁止 api_base 等客户端端点覆盖。使用支持该行为的版本并验证。
 - 这里只支持现有的单个 Node.js 后端实例，单进程会合并同一用户的并发凭证创建。扩展后端副本前，需要跨进程锁或独立的凭证供给服务。
-- 网关加密 Key 依赖原 `LLM_CONFIG_ENCRYPTION_KEY`；备份 SQLite 和网关 PostgreSQL 卷，保留 salt key。恢复网关数据库时使用匹配的备份，避免应用引用已不存在的凭证。
+- 网关加密 Key 依赖原 `LLM_CONFIG_ENCRYPTION_KEY`；备份 应用 PostgreSQL 和网关 PostgreSQL 卷，保留 salt key。恢复网关数据库时使用匹配的备份，避免应用引用已不存在的凭证。
 - 用户删除模型 Key 后，应用会阻止后续调用；网关凭证映射仍保留，避免重绑时反复生成 Key。凭证不下发前端，且无法在缺少用户上游 Key 时使用共享余额。注销账户或发生凭证泄露时，管理员仍应在 LiteLLM 中撤销对应虚拟 Key。
 
 ## 回退到直连
 
 ```bash
-docker compose -f docker-compose.yml up -d --force-recreate api
+docker compose --env-file deploy/postgres/.env --env-file deploy/redis/.env -f docker-compose.yml up -d --force-recreate api
 ```
 
 确认 `server/.env` 的 `LLM_GATEWAY_URL`、`LLM_GATEWAY_MASTER_KEY` 均为空。之后后端直接请求 DeepSeek，用户保存的模型 Key 无需重新填写。网关数据库和凭证映射保留，方便恢复。
