@@ -1,5 +1,6 @@
 // Embeddings use their own provider credentials, never a student's chat key.
 export function createEmbeddingClient ({ baseUrl, apiKey, model, dimensions, timeout = 8000, fetchImpl = fetch }) {
+  if (!Number.isInteger(timeout) || timeout < 100 || timeout > 120000) throw new Error('EMBEDDING_INVALID_TIMEOUT')
   const url = new URL(baseUrl)
   if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('无效的 embedding 服务地址')
   if (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]', 'host.docker.internal', 'embeddings'].includes(url.hostname)) throw new Error('远程 embedding 服务必须使用 HTTPS')

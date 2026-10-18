@@ -30,6 +30,7 @@ test('Embedding check rejects missing configuration and incompatible vector spac
     const fetchImpl = () => assert.fail('provider must not be called')
     await assert.rejects(() => checkEmbedding({ db: fixture.db, env: {}, fetchImpl }), /EMBEDDING_NOT_CONFIGURED/)
     await assert.rejects(() => checkEmbedding({ db: fixture.db, env: { ...settings, MEMORY_EMBEDDING_DIMENSIONS: '0' }, fetchImpl }), /EMBEDDING_INVALID_DIMENSIONS/)
+    await assert.rejects(() => checkEmbedding({ db: fixture.db, env: { ...settings, MEMORY_EMBEDDING_TIMEOUT_MS: '0' }, fetchImpl }), /EMBEDDING_INVALID_TIMEOUT/)
     await fixture.db.prepare('INSERT INTO campusmind_memory_space(singleton,identity,dimensions) VALUES (TRUE,?,3)').run('another-model')
     await assert.rejects(() => checkEmbedding({ db: fixture.db, env: settings, fetchImpl }), /MEMORY_EMBEDDING_SPACE_CHANGED/)
   } finally { await fixture.close() }

@@ -17,7 +17,13 @@
     "test:cache": "node --test --test-concurrency=1 tests/redis-cache.mjs",
     "cache:check": "node scripts/checkRedis.mjs",
     "embedding:check": "node scripts/checkEmbedding.mjs",
-    "test:embedding": "node --test tests/embedding-check.mjs"
+    "test:embedding": "node --test tests/embedding-check.mjs",
+    "embedding:local": "node scripts/configureLocalEmbedding.mjs",
+    "test:embedding-local": "node --test tests/local-embedding.mjs",
+    "rag:reindex": "node scripts/reindexResources.mjs",
+    "test:rag": "node --test tests/rag.mjs",
+    "test:rag:postgres": "node --test --test-concurrency=1 tests/rag-postgres.mjs",
+    "test:rag:local": "node --test tests/rag-local.mjs"
   },
   "dependencies": {
     "@alicloud/dysmsapi20170525": "^4.6.0",
