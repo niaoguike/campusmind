@@ -1,5 +1,13 @@
-import { tool } from 'langchain';
+import { createAgent, tool } from 'langchain';
 import { z } from 'zod';
+
+export function createRetrievalAgent({ model, tools }) {
+  return createAgent({
+    model,
+    tools,
+    systemPrompt: '你是 CampusMind 资料检索 Agent。必须调用 search_course_resources 查找原始请求涉及的课程资料，必要时使用不同短关键词检索。输出与子任务相关的证据摘要，逐项保留 source、页码和 file_path。检索不到时明确说明，不得编造来源或借助常识补写证据。你不能读取个人学习状态、制定计划或保存记忆。'
+  });
+}
 
 /**
  * 资料检索 Agent 的唯一工具。
