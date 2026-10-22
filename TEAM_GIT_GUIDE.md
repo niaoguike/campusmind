@@ -211,20 +211,22 @@ git fetch origin
 git switch master
 git pull --ff-only origin master
 
-docker compose build api web
-docker compose up -d --force-recreate api web
+docker compose --env-file deploy/postgres/.env --env-file deploy/redis/.env build api web
+docker compose --env-file deploy/postgres/.env --env-file deploy/redis/.env up -d --force-recreate api web
 
-docker compose cp web:/usr/share/nginx/html/. /var/www/campusmind/
+docker compose --env-file deploy/postgres/.env --env-file deploy/redis/.env cp web:/usr/share/nginx/html/. /var/www/campusmind/
 
 nginx -t && systemctl reload nginx
-docker compose ps
+docker compose --env-file deploy/postgres/.env --env-file deploy/redis/.env ps
 curl --fail --show-error http://127.0.0.1:3001/api/health
 ```
 
-健康检查成功时会显示类似：
+首次升级统一 PostgreSQL 时，先按照 [部署说明](DEPLOY.md) 准备数据库、Redis 配置、导入旧 SQLite 数据并迁移上传文件，再执行上面的更新命令。保留原有应用加密密钥；PR 合并不会自动迁移线上数据库。
+
+健康检查成功时会显示类似（缓存不可用时 `ready` 为 `false`）：
 
 ```json
-{"status":"ok","agent":"langchain","database":"sqlite"}
+{"status":"ok","agent":"langchain","database":"postgresql","cache":{"enabled":true,"ready":true}}
 ```
 
 部署后使用浏览器无痕窗口测试登录、学生端、教师端和本次新增功能。
@@ -272,7 +274,7 @@ git push
 确认已经执行：
 
 ```bash
-docker compose cp web:/usr/share/nginx/html/. /var/www/campusmind/
+docker compose --env-file deploy/postgres/.env --env-file deploy/redis/.env cp web:/usr/share/nginx/html/. /var/www/campusmind/
 nginx -t && systemctl reload nginx
 ```
 

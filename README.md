@@ -2,13 +2,14 @@
 
 CampusMind 是面向高校学生与教师的多 Agent 学习协作平台。平台把课程资料、课表计划、学习测验、师生协作和校园社区放在同一套系统中，并通过 LangChain 与 DeepSeek 为不同学习任务选择合适的 Agent 和工具。
 
-> 当前项目处于原型迭代阶段。业务数据默认使用 SQLite；PostgreSQL + pgvector、MCP 和 A2A 尚未接入，相关内容仍处于技术选型阶段。
+> 当前项目处于原型迭代阶段。业务、聊天、记忆任务统一使用 PostgreSQL；pgvector 支持画像与历史对话摘要的语义召回，Redis 缓存近期聊天上下文与消息列表。MCP 和 A2A 尚未接入。
 
 ## 核心功能
 
 ### 学生端
 
 - **专属学习 Agent**：支持课程问答、资料检索、学习规划、学习状态分析和偏好记忆。
+- **跨会话长期记忆（可选）**：自动整理稳定的学习偏好、目标和薄弱点，按语义在新会话中召回，支持查看、修改和删除。
 - **行动工作台**：将复杂目标拆成步骤，对需要发布或修改平台数据的操作进行确认。
 - **课程资料库**：上传 PDF、Office、表格、文本和图片资料，按课程和文件夹管理并检索文本内容。
 - **AI 测验**：依据课程资料生成单选、多选、判断、填空和简答题，记录答题结果与知识点掌握情况。
@@ -52,13 +53,15 @@ Express API：身份校验、会话上下文和权限控制
 LangChain Function Calling：按需调用受限工具
    │
    ▼
-SQLite / 课程资料 / 学习记录
+PostgreSQL / pgvector / 课程资料 / 学习记录
    │
    ▼
 生成回答并保存可查看的 Agent 执行轨迹
 ```
 
 系统还包含出题、简答题评估、群组协作和学习成果规划等专用模块。当前工具均为后端内部的 LangChain Tool，尚未通过 MCP 对外提供；多个 Agent 也运行在同一个应用内，尚未使用 A2A 协议。
+
+个人对话保留最近 12 条消息作为短期上下文。启用长期记忆后，新消息和记忆任务在同一事务中写入 PostgreSQL；后台提取带原话证据的学习事实，并按消息段生成历史摘要。后续会话通过 pgvector 召回相关画像和历史摘要，再与近期上下文合并。部署和配置见 [数据库迁移说明](deploy/postgres/README.md)与[记忆工作流说明](deploy/memory/README.md)。
 
 模型调用默认由后端直接连接 DeepSeek。每个用户在“模型设置”中保存自己的 API Key，并自行承担模型额度；Key 加密保存，完整内容不会回传浏览器。部署时也可以启用 LiteLLM 网关，为每位用户建立独立虚拟 Key，详情见 [大模型网关部署说明](deploy/llm-gateway/README.md)。
 
@@ -69,7 +72,7 @@ SQLite / 课程资料 / 学习记录
 | 前端 | Vue 3、Vite、Vue Router、Element Plus、Axios |
 | 后端 | Node.js、Express |
 | Agent | LangChain.js、DeepSeek、Function Calling |
-| 数据与认证 | SQLite、better-sqlite3、JWT、scrypt |
+| 数据与认证 | PostgreSQL、node-postgres、pgvector、JWT、scrypt |
 | 文件处理 | pdf-parse、pdfplumber、Mammoth、SheetJS、JSZip |
 | 成果导出 | docx、PDFKit、PptxGenJS |
 | 部署 | Docker Compose、Nginx |
@@ -155,11 +158,24 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 | `ALIBABA_CLOUD_ACCESS_KEY_ID` 等 | 开启阿里云短信登录和密码重置 | 可选 |
 | `LLM_GATEWAY_URL`、`LLM_GATEWAY_MASTER_KEY` | 连接自建 LiteLLM 网关 | 可选，必须同时配置 |
 | `LLM_GATEWAY_RPM`、`LLM_GATEWAY_TPM` | 新建用户虚拟 Key 的限流 | 启用网关时可选 |
-| `CAMPUSMIND_DB_PATH` | 自定义 SQLite 文件路径 | 可选 |
+| `CAMPUSMIND_DB_PATH` | 仅供旧库导入工具指定 SQLite 来源路径 | 可选 |
+| `DATABASE_URL` | 统一 PostgreSQL 连接；开发时可使用 `deploy/postgres/.env` 的本地配置 | 生产必需 |
+| `REDIS_URL`、`REDIS_ENABLED` | 聊天缓存；开发时可自动读取 `deploy/redis/.env`，设为 `false` 可关闭 | 可选 |
+| `MEMORY_ENABLED`、`MEMORY_EMBEDDING_*` | 开启画像和历史摘要的语义记忆 | 可选，启用时需完整配置 |
 
 不要把用户的 DeepSeek API Key 写入 `server/.env`。用户登录后在网页的“模型设置”中单独配置，目前支持 `deepseek-v4-flash` 和 `deepseek-v4-pro`。
 
 ### 4. 启动项目
+
+先按[数据库说明](deploy/postgres/README.md)启动本地 PostgreSQL；已有 SQLite 数据应先执行导入，再启动 API。Windows 可执行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File deploy/postgres/start-local.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File deploy/redis/start-local.ps1
+npm --prefix server run db:migrate
+```
+
+Redis 的缓存范围、过期和断线回退详见[缓存说明](deploy/redis/README.md)。不启动 Redis 时仍可使用 PostgreSQL；已有后端进程需重启以加载新配置。
 
 在第一个终端启动后端：
 
@@ -194,9 +210,12 @@ node server/tests/portal-session.mjs
 
 # LiteLLM 网关模拟集成测试
 npm --prefix server run test:gateway
+
+# PostgreSQL 事务、迁移、长期记忆及完整聊天链路
+npm --prefix server run test:postgres
 ```
 
-测试使用临时数据库或本地模拟网关，不会验证真实 DeepSeek 额度与线上 LiteLLM 镜像。真实部署仍需使用测试账户完成人工验收。
+后端测试需要运行中的 PostgreSQL，使用随机命名的独立 schema 和本地模拟模型，不修改业务数据，也不验证真实模型额度。可通过 `TEST_DATABASE_URL` 指定测试数据库。
 
 ## Docker 与服务器部署
 
@@ -204,21 +223,23 @@ npm --prefix server run test:gateway
 
 ```bash
 cp server/.env.example server/.env
-# 编辑 server/.env 后执行
-docker compose up -d --build
+cp -n deploy/postgres/.env.example deploy/postgres/.env
+cp -n deploy/redis/.env.example deploy/redis/.env
+# 首次部署时编辑上述配置；升级时保留原有配置和密钥
+docker compose --env-file deploy/postgres/.env --env-file deploy/redis/.env up -d --build
 ```
 
-基础编排包含前端和 API，SQLite 数据保存在宿主机的 `data/data.db`。Ubuntu ECS、Nginx、数据备份与更新步骤见 [DEPLOY.md](DEPLOY.md)。如需启用按用户凭证隔离的 LiteLLM 网关，请按照 [deploy/llm-gateway/README.md](deploy/llm-gateway/README.md) 使用两个 Compose 文件启动。
+基础编排包含前端、API 和 PostgreSQL，数据库及上传文件分别保存在持久化卷中。Ubuntu ECS、Nginx、备份与更新步骤见 [DEPLOY.md](DEPLOY.md)。可选 LiteLLM 网关使用独立的状态库，见 [网关部署说明](deploy/llm-gateway/README.md)。
 
 ## 数据与安全
 
-- 默认业务数据库为 `server/data.db`；Docker 部署时为 `data/data.db`。
+- 默认业务数据库为 PostgreSQL。旧 SQLite 仅由一次性导入工具只读打开，不再作为运行时存储。
 - 用户密码使用 scrypt 派生值保存，登录状态使用 JWT。
 - 用户模型 Key 经 `LLM_CONFIG_ENCRYPTION_KEY` 加密后保存。
 - Agent 工具按用户、课程和角色校验权限；跨用户 Agent 协作需要显式授权。
 - 教师 AI 建议只使用课程匿名统计，并作为待审核草稿返回。
 - 请勿提交 `server/.env`、数据库、上传文件、真实学生数据、Token 或 API Key。
-- 生产环境必须更换示例密钥，并定期备份 SQLite 数据库和上传文件。
+- 生产环境必须更换示例密钥，并定期备份 PostgreSQL 和上传文件。
 
 ## 协作流程
 

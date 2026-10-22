@@ -8,6 +8,11 @@ server/node_modules/
 server/data.db
 server/data.db-*
 server/.env
+.env
+**/.env
 data/
+server/uploads/
+output/
+tmp/
 tmp_*.png
 *.log

@@ -6,14 +6,24 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
-    "test:gateway": "node --test tests/llm-gateway.mjs"
+    "test:gateway": "node --test tests/llm-gateway.mjs",
+    "test:memory": "node --test tests/long-term-memory.mjs",
+    "db:check": "node scripts/checkPostgres.mjs",
+    "db:migrate": "node scripts/migrateDatabase.mjs",
+    "db:import-sqlite": "node scripts/importSQLite.mjs",
+    "db:backfill-summaries": "node scripts/backfillSummaries.mjs",
+    "test:postgres": "node --test --test-concurrency=1 tests/long-term-memory.mjs tests/postgres-chat.mjs",
+    "test:api": "node tests/teacher-portal.mjs",
+    "test:cache": "node --test --test-concurrency=1 tests/redis-cache.mjs",
+    "cache:check": "node scripts/checkRedis.mjs",
+    "embedding:check": "node scripts/checkEmbedding.mjs",
+    "test:embedding": "node --test tests/embedding-check.mjs"
   },
   "dependencies": {
     "@alicloud/dysmsapi20170525": "^4.6.0",
     "@alicloud/openapi-core": "^1.0.8",
     "@langchain/core": "^1.2.3",
     "@langchain/openai": "^1.5.5",
-    "better-sqlite3": "^12.11.1",
     "cors": "^2.8.5",
     "docx": "^9.7.1",
     "dotenv": "^16.4.7",
@@ -25,8 +35,13 @@
     "multer": "^2.2.0",
     "pdf-parse": "^2.4.5",
     "pdfkit": "^0.19.1",
+    "pg": "^8.23.1",
     "pptxgenjs": "^4.0.1",
+    "redis": "^5.12.1",
     "xlsx": "^0.18.5",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "better-sqlite3": "^12.11.1"
   }
 }

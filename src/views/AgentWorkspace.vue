@@ -7,6 +7,7 @@
         <p class="label">我的专属 Agent</p>
         <div class="agent-card"><span class="agent-photo"><AvatarBadge :value="myProfile.agent_avatar || '✦'" :alt="myProfile.agent_name || '我的 Agent'" /></span><div><b>{{ myProfile.agent_name || '知行' }}</b><small>学习教练 · LangChain</small></div></div>
         <p class="hint">{{ agentMode === 'study' ? '专注课程问答、资料检索、学习规划与成果生成。' : '拆解复杂目标并调用平台能力；所有对外操作仍由你最终确认。' }}</p>
+        <LongTermMemories />
         <template v-if="agentMode === 'action'">
           <p class="label capability-label">行动能力</p>
           <button class="collaboration-entry" type="button" @click="openCollaboration">✦ 同课程 Agent 协作 <em v-if="pendingIncomingDelegations.length">{{ pendingIncomingDelegations.length }}</em></button>
@@ -163,6 +164,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import AppNav from '../components/AppNav.vue'
 import AvatarBadge from '../components/AvatarBadge.vue'
+import LongTermMemories from '../components/LongTermMemories.vue'
 import { api, post } from '../utils/api'
 import { renderLearningMarkdown } from '../utils/learningMarkdown'
 

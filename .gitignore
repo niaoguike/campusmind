@@ -4,6 +4,9 @@ dist-check/
 .env
 server/.env
 deploy/llm-gateway/.env
+deploy/memory/.env
+deploy/postgres/.env
+deploy/redis/.env
 *.log
 server/server.err
 .vscode/
@@ -13,6 +16,7 @@ server/server.err
 server/data.db
 server/data.db-*
 data/
+server/uploads/
 tmp_*.png
 
 # Unrelated local tooling checkout.

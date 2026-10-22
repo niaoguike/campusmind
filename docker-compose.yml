@@ -5,11 +5,29 @@ services:
       dockerfile: Dockerfile.api
     env_file:
       - ./server/.env
+    environment:
+      DATABASE_URL: postgresql://campusmind:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/postgres/.env}@postgres:5432/campusmind
+      REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in deploy/redis/.env}@redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
     restart: unless-stopped
     ports:
       - "127.0.0.1:3001:3001"
     volumes:
-      - ./data/data.db:/app/data.db
+      - campusmind-uploads:/app/uploads
+
+  postgres:
+    extends:
+      file: docker-compose.postgres.yml
+      service: postgres
+
+  redis:
+    extends:
+      file: docker-compose.redis.yml
+      service: redis
 
   web:
     build:
@@ -18,3 +36,7 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:8080:80"
+
+volumes:
+  campusmind-postgres:
+  campusmind-uploads:

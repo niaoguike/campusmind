@@ -1,0 +1,23 @@
+# Standalone local PostgreSQL, also reused by the full application Compose file.
+# docker compose --env-file deploy/postgres/.env -f docker-compose.postgres.yml up -d
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: campusmind
+      POSTGRES_USER: campusmind
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/postgres/.env}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - campusmind-postgres:/var/lib/postgresql/data
+      - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/001-vector.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U campusmind -d campusmind"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  campusmind-postgres:
