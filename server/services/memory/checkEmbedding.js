@@ -10,7 +10,7 @@ export async function checkEmbedding ({ db, env = process.env, fetchImpl = fetch
   const identity = createHash('sha256').update(`${baseUrl.replace(/\/+$/, '')}|${model}|${dimensions}`).digest('hex')
   const existing = await db.prepare('SELECT identity,dimensions FROM campusmind_memory_space WHERE singleton=TRUE').get()
   if (existing && (existing.identity !== identity || Number(existing.dimensions) !== dimensions)) throw new Error('MEMORY_EMBEDDING_SPACE_CHANGED')
-  const embed = createEmbeddingClient({ baseUrl, apiKey, model, dimensions, fetchImpl })
+  const embed = createEmbeddingClient({ baseUrl, apiKey, model, dimensions, timeout: Number(env.MEMORY_EMBEDDING_TIMEOUT_MS || 8000), fetchImpl })
   const started = Date.now()
   const vectors = await Promise.all([
     embed('我希望加强动态规划和背包问题的练习。'),

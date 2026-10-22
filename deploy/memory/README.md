@@ -4,6 +4,8 @@
 
 ## 配置
 
+本机开发可以用 Ollama + BGE-M3，无需云端 embedding Key。启动、资源成本与验证步骤见[本地向量服务](../embeddings/README.md)。
+
 在 `server/.env` 中配置独立的文本向量服务：
 
 ```dotenv

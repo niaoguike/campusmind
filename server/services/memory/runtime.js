@@ -11,17 +11,17 @@ export function createLongTermMemoryService ({db,llm,userOf,env=process.env,stor
   const enabled=env.MEMORY_ENABLED!=='false'&&Boolean(injectedStore||configured||env.MEMORY_ENABLED==='true')
   if(enabled&&!injectedEmbed&&!configured)throw new Error('启用长期记忆时必须配置独立的 embedding 地址、模型和 API Key')
   if(env.MEMORY_DATABASE_URL)throw new Error('请移除 MEMORY_DATABASE_URL，长期记忆现在统一使用业务 DATABASE_URL')
-  const dimensions=Number(env.MEMORY_EMBEDDING_DIMENSIONS||1024),minimum=Number(env.MEMORY_MIN_SIMILARITY||0.5),writeMode=env.MEMORY_WRITE_MODE||'auto'
+  const dimensions=Number(env.MEMORY_EMBEDDING_DIMENSIONS||1024),minimum=Number(env.MEMORY_MIN_SIMILARITY||0.5),writeMode=env.MEMORY_WRITE_MODE||'auto',embeddingTimeout=Number(env.MEMORY_EMBEDDING_TIMEOUT_MS||8000)
   if(!Number.isInteger(dimensions)||dimensions<1||dimensions>2000)throw new Error('MEMORY_EMBEDDING_DIMENSIONS 必须为 1 到 2000 的整数')
   if(!Number.isFinite(minimum)||minimum<0||minimum>1)throw new Error('MEMORY_MIN_SIMILARITY 必须在 0 到 1 之间')
   if(!['auto','explicit','off'].includes(writeMode))throw new Error('MEMORY_WRITE_MODE 无效')
   const identity=createHash('sha256').update(`${(env.MEMORY_EMBEDDING_BASE_URL||'injected').replace(/\/+$/,'')}|${env.MEMORY_EMBEDDING_MODEL||'test'}|${dimensions}`).digest('hex')
-  const embed=enabled?(injectedEmbed||createEmbeddingClient({baseUrl:env.MEMORY_EMBEDDING_BASE_URL,apiKey:env.MEMORY_EMBEDDING_API_KEY,model:env.MEMORY_EMBEDDING_MODEL,dimensions})):null
+  const embed=enabled?(injectedEmbed||createEmbeddingClient({baseUrl:env.MEMORY_EMBEDDING_BASE_URL,apiKey:env.MEMORY_EMBEDDING_API_KEY,model:env.MEMORY_EMBEDDING_MODEL,dimensions,timeout:embeddingTimeout})):null
   let store,draining,timer,closed=false
   const locks=new Map()
   async function getStore(){if(!enabled)throw new Error('MEMORY_DISABLED');if(!store)store=injectedStore||createMemoryStore({pool:db.pool,dimensions,identity,ownsPool:false,onMutation:invalidateSummaryHistory});return store}
   async function withUser(userId,run){userIdOf(userId);const current=(locks.get(userId)||Promise.resolve()).catch(()=>{}).then(run);locks.set(userId,current);try{return await current}finally{if(locks.get(userId)===current)locks.delete(userId)}}
-  const episodes=createEpisodeMemory({db,userOf,llm,embed,getStore,identity,enabled,minimum,safeContent:text=>!sensitiveMemory.test(text),summarize,minimumMessages:Number(env.MEMORY_SUMMARY_MIN_MESSAGES||6)})
+  const episodes=createEpisodeMemory({db,userOf,llm,embed,getStore,identity,enabled,minimum,embeddingTimeout,safeContent:text=>!sensitiveMemory.test(text),summarize,minimumMessages:Number(env.MEMORY_SUMMARY_MIN_MESSAGES||6)})
   async function recall(userId,query,{threadId=0,historyStartId=0}={}){
     userIdOf(userId)
     if(!enabled)return {status:'disabled',items:[],episodes:[],brief:''}
@@ -58,7 +58,7 @@ export function createLongTermMemoryService ({db,llm,userOf,env=process.env,stor
     if(!enabled||closed||writeMode==='off')return
     if(draining)return draining
     draining=(async()=>{
-      const now=Date.now(),lease=now+600000
+      const now=Date.now(),lease=now+Math.max(600000,4*(15000+5*embeddingTimeout)+30000)
       const {rows:jobs}=await db.query(`UPDATE long_term_memory_jobs SET state='running',lease_until=$1
         WHERE message_id IN (SELECT message_id FROM long_term_memory_jobs WHERE (state='pending' AND next_at<=$2)
         OR (state='running' AND lease_until<$2) ORDER BY message_id FOR UPDATE SKIP LOCKED LIMIT 4) RETURNING *`,[lease,now])

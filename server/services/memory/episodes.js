@@ -9,7 +9,7 @@ export async function invalidateSummaryHistory (client, userId) {
     ON CONFLICT(user_id) DO UPDATE SET through_message_id=GREATEST(memory_privacy_barriers.through_message_id,excluded.through_message_id)`, [userId])
 }
 
-export function createEpisodeMemory ({ db, userOf, llm, embed, getStore, identity, enabled, minimum, safeContent, summarize: injectedSummarize, minimumMessages = 6 }) {
+export function createEpisodeMemory ({ db, userOf, llm, embed, getStore, identity, enabled, minimum, safeContent, summarize: injectedSummarize, minimumMessages = 6, embeddingTimeout = 8000 }) {
   async function enqueue (userId, threadId, messageId, force = false) {
     if (!enabled) return
     const owner = await db.prepare('SELECT 1 FROM agent_threads WHERE id=? AND user_id=?').get(threadId, userId)
@@ -80,7 +80,7 @@ export function createEpisodeMemory ({ db, userOf, llm, embed, getStore, identit
   }
   async function drain () {
     if (!enabled) return
-    const now = Date.now(), lease = now + 120000
+    const now = Date.now(), lease = now + Math.max(120000, 2 * (15000 + embeddingTimeout) + 30000)
     const { rows: jobs } = await db.query(`UPDATE conversation_summary_jobs SET state='running',lease_until=$1
       WHERE thread_id IN (SELECT thread_id FROM conversation_summary_jobs WHERE (state='pending' AND next_at<=$2)
       OR (state='running' AND lease_until<$2) ORDER BY thread_id FOR UPDATE SKIP LOCKED LIMIT 2) RETURNING *`, [lease, now])

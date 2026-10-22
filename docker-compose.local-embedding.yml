@@ -1,0 +1,20 @@
+# Opt-in overlay for the full application; pull bge-m3 before starting the API.
+services:
+  api:
+    environment:
+      MEMORY_ENABLED: 'true'
+      MEMORY_EMBEDDING_BASE_URL: http://embeddings:11434/v1
+      MEMORY_EMBEDDING_API_KEY: ollama
+      MEMORY_EMBEDDING_MODEL: bge-m3
+      MEMORY_EMBEDDING_DIMENSIONS: '1024'
+      MEMORY_EMBEDDING_TIMEOUT_MS: '60000'
+    depends_on:
+      embeddings:
+        condition: service_healthy
+  embeddings:
+    extends:
+      file: docker-compose.embeddings.yml
+      service: embeddings
+
+volumes:
+  campusmind-ollama:
