@@ -1,7 +1,3 @@
-import { createPlannerAgent } from './plannerAgent.js'
-import { createTutorAgent } from './tutorAgent.js'
-import { createReflectionAgent } from './reflectionAgent.js'
-
 const PLAN_PATTERN = /(计划|安排|日程|复习表|学习表|任务清单|时间表|每天.*学|本周.*学|下周.*学)/
 const RESOURCE_PATTERN = /(资料|课件|讲义|教材|ppt|pdf|文件夹|搜(?:索|一下)?|检索|在哪(?:里)?|有没有.*(?:课件|资料))/
 const REFLECTION_PATTERN = /(薄弱|画像|复盘|学习偏好|记住|掌握.*(?:情况|程度)|分析.*(?:学习|错误|错题))/
@@ -58,35 +54,11 @@ export async function classifyLearningIntent ({ content = '', model }) {
 }
 
 export async function createLearningCoordinator ({ content, model, user, tools }) {
-  const intent = await classifyLearningIntent({ content, model })
-
-  if (intent === 'planner') {
-    return {
-      type: 'planner',
-      label: '学习计划 Agent',
-      agent: createPlannerAgent({ model, user, tools: [tools.search, tools.snapshot, tools.createPlanDraft, tools.remember] })
-    }
-  }
-
-  if (intent === 'retrieval') {
-    return {
-      type: 'retrieval',
-      label: '资料检索 Agent',
-      agent: createTutorAgent({ model, user, tools: [tools.search] })
-    }
-  }
-
-  if (intent === 'reflection') {
-    return {
-      type: 'reflection',
-      label: '学习画像 Agent',
-      agent: createReflectionAgent({ model, user, tools: [tools.snapshot, tools.remember] })
-    }
-  }
-
-  return {
-    type: 'tutor',
-    label: '学习导师 Agent',
-    agent: createTutorAgent({ model, user, tools: [tools.search, tools.snapshot, tools.remember] })
-  }
+  // Compatibility entry point; execution is now owned by the orchestrator.
+  const { createLearningOrchestrator } = await import('./orchestrator.js')
+  const orchestration = await createLearningOrchestrator({ content, model, user, tools })
+  return { ...orchestration, agent: { invoke: async input => {
+    const result = await orchestration.invoke(input)
+    return { messages: [{ role: 'assistant', content: result.answer }] }
+  } } }
 }
