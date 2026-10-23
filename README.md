@@ -1,6 +1,6 @@
 # CampusMind
 
-CampusMind 是面向高校学生与教师的多 Agent 学习协作平台。平台把课程资料、课表计划、学习测验、师生协作和校园社区放在同一套系统中，并通过 LangChain 与 DeepSeek 为不同学习任务选择合适的 Agent 和工具。
+CampusMind 是面向高校学生与教师的多 Agent 学习协作平台。平台把课程资料、课表计划、学习测验、师生协作和校园社区放在同一套系统中，通过自定义 Orchestrator 编排 LangChain 专业 Agent，由 DeepSeek 理解任务并生成回答。
 
 > 当前项目处于原型迭代阶段。业务、聊天、记忆任务统一使用 PostgreSQL；pgvector 支持画像与历史对话摘要的语义召回，Redis 缓存近期聊天上下文与消息列表。MCP 和 A2A 尚未接入。
 
@@ -43,11 +43,11 @@ CampusMind 是面向高校学生与教师的多 Agent 学习协作平台。平�
 Express API：身份校验、会话上下文和权限控制
    │
    ▼
-学习协调器：识别问题意图
-   ├── 学习导师 Agent：概念讲解与综合问答
-   ├── 资料检索 Agent：检索课程资料正文
-   ├── 学习计划 Agent：生成计划草稿
-   └── 学习画像 Agent：分析学习状态并记录偏好
+Orchestrator：生成并校验任务依赖图，失败时使用规则计划
+   ├── 资料检索 Agent ─┐  无依赖的任务最多两个并行
+   ├── 学习复盘 Agent ─┤
+   ├── 学习导师 Agent ◄┤  按计划接收前序证据
+   └── 学习计划 Agent ◄┘  生成计划或待确认草稿
    │
    ▼
 LangChain Function Calling：按需调用受限工具
@@ -56,10 +56,15 @@ LangChain Function Calling：按需调用受限工具
 PostgreSQL / pgvector / 课程资料 / 学习记录
    │
    ▼
-生成回答并保存可查看的 Agent 执行轨迹
+多任务由整合 Agent 汇总；单任务直接返回
+保存实际执行状态、资料引用和未完成项
 ```
 
-系统还包含出题、简答题评估、群组协作和学习成果规划等专用模块。当前工具均为后端内部的 LangChain Tool，尚未通过 MCP 对外提供；多个 Agent 也运行在同一个应用内，尚未使用 A2A 协议。
+个人对话编排器会生成最多四个专业任务，每个角色每轮最多执行一次，校验角色白名单、依赖引用和循环依赖。独立任务最多两个并行，后续任务接收前置结果与引用；前置失败时跳过依赖任务，汇总时明确展示未完成项。整合失败则返回已完成任务的原始结果。模型规划超过 15 秒或计划无效时使用规则计划；专业 Agent 有 90 秒取消信号和 12 步运行上限。写工具仅分配给指定角色，汇总阶段没有工具，不自动重试可能已写入草稿的任务。
+
+编排入口为 `server/agents/orchestrator.js`，运行轨迹由 `personalRunTrace.js` 根据真实执行事件保存。API 保留 `orchestration.type/label`，增加 `plan`（任务与依赖）和 `status`（`done` / `degraded`）。运行记录使用 `partial` 表示部分完成，步骤使用 `skipped` 表示因前置失败未执行。多任务需要额外的专业推理和结果整合调用，模型费用与耗时会相应增加。运行 `cd server` 后执行 `npm run test:orchestrator` 验证调度与 LangChain 工具调用，`npm run test:orchestrator:postgres` 验证数据库与聊天接口集成。
+
+系统还包含出题、简答题评估、群组协作和学习成果规划等专用模块，这些模块保留各自的业务流程。当前工具均为后端内部的 LangChain Tool，尚未通过 MCP 对外提供；多个 Agent 也运行在同一个应用内，尚未使用 A2A 协议。
 
 个人对话保留最近 12 条消息作为短期上下文。启用长期记忆后，新消息和记忆任务在同一事务中写入 PostgreSQL；后台提取带原话证据的学习事实，并按消息段生成历史摘要。后续会话通过 pgvector 召回相关画像和历史摘要，再与近期上下文合并。部署和配置见 [数据库迁移说明](deploy/postgres/README.md)与[记忆工作流说明](deploy/memory/README.md)。
 
