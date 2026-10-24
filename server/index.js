@@ -1,4 +1,5 @@
 import { forEachAsync, filterAsync, mapAsync, someAsync } from "./db/asyncCollections.js";import { migrateDatabase } from "./db/migrate.js";import express from 'express';
+import { normalizeCourseTargets, normalizeStudentIdentity, normalizedTargetRows } from './services/identityNormalization.js';
 import cors from 'cors';
 import { createAsyncApp } from './db/http.js';
 import dotenv from 'dotenv';import { createDatabase } from "./db/database.js";
@@ -47,7 +48,30 @@ const SMS_CONFIG = {
 };
 const smsEnabled = Object.values(SMS_CONFIG).every(Boolean);
 let smsClient = null;
-const db = await createDatabase();await migrateDatabase(db);
+async function backfillIdentityNormalization(db) {
+  await db.transaction(async () => {
+    const users = await db.prepare('SELECT id,college,class,college_raw,class_raw,college_key,class_key FROM users').all();
+    for (const user of users) {
+      const normalized = normalizeStudentIdentity(user.college_raw || user.college, user.class_raw || user.class);
+      if (normalized.ok) {
+        await db.prepare('UPDATE users SET college=?,class=?,college_raw=?,class_raw=?,college_key=?,class_key=? WHERE id=?').run(normalized.college, normalized.className, normalized.collegeRaw, normalized.classRaw, normalized.collegeKey, normalized.classKey, user.id);
+      } else if (!user.college_raw || !user.class_raw) {
+        await db.prepare('UPDATE users SET college_raw=COALESCE(NULLIF(college_raw,\'\'),?),class_raw=COALESCE(NULLIF(class_raw,\'\'),?) WHERE id=?').run(user.college, user.class, user.id);
+      }
+    }
+    const courses = await db.prepare('SELECT id,college,class_name,college_raw,class_name_raw FROM courses').all();
+    for (const course of courses) {
+      const existing = await db.prepare('SELECT COUNT(*) count FROM course_targets WHERE course_id=?').get(course.id);
+      if (Number(existing?.count || 0) || !course.college && !course.class_name) continue;
+      const normalized = normalizeCourseTargets(course.college_raw || course.college, course.class_name_raw || course.class_name);
+      if (!normalized.ok) continue;
+      await db.prepare('UPDATE courses SET college=?,class_name=?,college_raw=?,class_name_raw=? WHERE id=?').run(normalized.college, normalized.className, normalized.collegeRaw, normalized.classRaw, course.id);
+      await db.prepare('DELETE FROM course_targets WHERE course_id=?').run(course.id);
+      for (const target of normalizedTargetRows(normalized)) await db.prepare('INSERT INTO course_targets (course_id,college_key,college,class_key,class_name) VALUES (?,?,?,?,?) ON CONFLICT DO NOTHING').run(course.id, target.collegeKey, target.college, target.classKey, target.className);
+    }
+  })();
+}
+const db = await createDatabase();await migrateDatabase(db);await backfillIdentityNormalization(db);
 const conversationCache = createConversationCache({ env: await conversationCacheConfig() });
 await conversationCache.start();
 
@@ -411,10 +435,29 @@ async function courseInviteCode() {
   }
   throw new Error('邀请码生成失败，请稍后重试');
 }
+async function saveCourseTargets(courseId, normalized) {
+  await db.prepare('DELETE FROM course_targets WHERE course_id=?').run(courseId);
+  for (const target of normalizedTargetRows(normalized)) await db.prepare('INSERT INTO course_targets (course_id,college_key,college,class_key,class_name) VALUES (?,?,?,?,?) ON CONFLICT DO NOTHING').run(courseId, target.collegeKey, target.college, target.classKey, target.className);
+}
+async function courseTargetsOf(course) {
+  let targets = await db.prepare('SELECT college_key,college,class_key,class_name FROM course_targets WHERE course_id=? ORDER BY college_key,class_key').all(course.id);
+  if (targets.length) return targets;
+  const normalized = normalizeCourseTargets(course.college_raw || course.college, course.class_name_raw || course.class_name);
+  if (!normalized.ok) return [];
+  await saveCourseTargets(course.id, normalized);
+  targets = await db.prepare('SELECT college_key,college,class_key,class_name FROM course_targets WHERE course_id=? ORDER BY college_key,class_key').all(course.id);
+  return targets;
+}
 async function syncCourseClassMembers(courseId) {
   const course = await courseOf(courseId),space = await courseSpaceOf(courseId);
-  if (!course || !space || !course.college || !course.class_name) return 0;
-  const students = await db.prepare("SELECT id FROM users WHERE role='student' AND college=? AND class=?").all(course.college, course.class_name);
+  if (!course || !space) return 0;
+  const targets = await courseTargetsOf(course);
+  if (!targets.length) return 0;
+  const students = await db.prepare(`SELECT u.id FROM users u
+    WHERE u.role='student' AND EXISTS (
+      SELECT 1 FROM course_targets t
+      WHERE t.course_id=? AND t.college_key=u.college_key AND t.class_key=u.class_key
+    )`).all(course.id);
   const addMembership = db.prepare('INSERT INTO course_student_memberships (course_id,student_id) VALUES (?,?) ON CONFLICT DO NOTHING');
   const addConversationMember = db.prepare('INSERT INTO conversation_members (conversation_id,user_id) VALUES (?,?) ON CONFLICT DO NOTHING');
   for (const student of students) { await addMembership.run(course.id, student.id); await addConversationMember.run(space.conversation_id, student.id); }
@@ -807,16 +850,19 @@ app.post('/api/register', async (req, res) => {
   const role = req.body.role === undefined ? 'student' : req.body.role;
   if (!['student', 'teacher'].includes(role)) return res.status(400).json({ error: '请选择学生或教师身份' });
   const account = String(role === 'teacher' ? req.body.teacher_id || '' : req.body.student_id || '').trim();
-  const name = String(req.body.name || '').trim(),phone = String(req.body.phone || '').trim(),college = String(req.body.college || '').trim(),className = role === 'teacher' ? '' : String(req.body.class || '').trim(),password = req.body.password;
-  if (!account || !name || !college || role === 'student' && !className) return res.status(400).json({ error: '请填写完整身份信息' });
+  const name = String(req.body.name || '').trim(),phone = String(req.body.phone || '').trim(),rawCollege = String(req.body.college || '').trim(),rawClass = role === 'teacher' ? '' : String(req.body.class || '').trim(),password = req.body.password;
+  const normalizedStudent = role === 'student' ? normalizeStudentIdentity(rawCollege, rawClass) : null;
+  const college = normalizedStudent?.college || rawCollege,className = normalizedStudent?.className || '';
+  if (!account || !name || !college || role === 'student' && !rawClass) return res.status(400).json({ error: '请填写完整身份信息' });
+  if (role === 'student' && !normalizedStudent?.ok) return res.status(400).json({ error: normalizedStudent.error });
   if (role === 'student' && !/^\d{8}$/.test(account)) return res.status(400).json({ error: '学号必须为8位数字' });
   if (role === 'teacher' && !/^[A-Za-z0-9_-]{2,32}$/.test(account)) return res.status(400).json({ error: '教师工号需为2至32位字母、数字、下划线或短横线' });
-  if (name.length > 40 || college.length > 100 || className.length > 60) return res.status(400).json({ error: '姓名、学院或班级过长' });
+  if (name.length > 40 || rawCollege.length > 100 || rawClass.length > 100) return res.status(400).json({ error: '姓名、学院或班级过长' });
   if (!validPhone(phone)) return res.status(400).json({ error: '请输入正确的11位手机号' });
   if (typeof password !== 'string' || password.length < 6 || password.length > 128) return res.status(400).json({ error: '密码需为6至128位' });
   if (await db.prepare('SELECT 1 FROM users WHERE student_id=? OR phone=?').get(account, phone)) return res.status(409).json({ error: '该学号、工号或手机号已注册，请直接登录' });
   try {
-    const result = await db.prepare('INSERT INTO users (student_id,name,phone,college,class,password,role) VALUES (?,?,?,?,?,?,?)').run(account, name, phone, college, className, hashPassword(password), role);
+    const result = await db.prepare('INSERT INTO users (student_id,name,phone,college,class,password,role,college_raw,class_raw,college_key,class_key) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(account, name, phone, college, className, hashPassword(password), role, normalizedStudent?.collegeRaw || rawCollege, normalizedStudent?.classRaw || rawClass, normalizedStudent?.collegeKey || '', normalizedStudent?.classKey || '');
     const user = await userOf(Number(result.insertId));
     res.status(201).json({ message: '注册成功', token: tokenForUser(user), user: publicUser(user) });
   } catch {res.status(409).json({ error: '注册失败，请检查账号是否已注册' });}
@@ -2521,14 +2567,17 @@ app.get('/api/teacher/resources/:id/file', auth, async (req, res) => {
 app.post('/api/teacher/courses', auth, async (req, res) => {
   if (!(await isTeacher(req.user.id))) return res.status(403).json({ error: '仅教师可创建课程' });
   const name = String(req.body.name || '').trim();
-  const college = String(req.body.college || '').trim().slice(0, 100),className = String(req.body.class_name || req.body.class || '').trim().slice(0, 100);
-  if (!name || name.length > 100 || !college || !className) return res.status(400).json({ error: '请填写课程名称、学院和班级' });
+  const rawCollege = String(req.body.college || '').trim().slice(0, 200),rawClassName = String(req.body.class_name || req.body.class || '').trim().slice(0, 200),normalized = normalizeCourseTargets(rawCollege, rawClassName);
+  if (!name || name.length > 100 || !rawCollege || !rawClassName) return res.status(400).json({ error: '请填写课程名称、学院和班级' });
+  if (!normalized.ok) return res.status(400).json({ error: normalized.error });
+  const college = normalized.college,className = normalized.className;
   const result = await db.transaction(async () => {
     const teacher = await userOf(req.user.id);
-    const inserted = await db.prepare('INSERT INTO courses (name,teacher,color,college,class_name) VALUES (?,?,?,?,?)').run(name, teacher.name, '#c96d42', college, className);
+    const inserted = await db.prepare('INSERT INTO courses (name,teacher,color,college,class_name,college_raw,class_name_raw) VALUES (?,?,?,?,?,?,?)').run(name, teacher.name, '#c96d42', college, className, normalized.collegeRaw, normalized.classRaw);
+    await saveCourseTargets(Number(inserted.insertId), normalized);
     await db.prepare('INSERT INTO course_teacher_assignments (course_id,user_id) VALUES (?,?)').run(inserted.insertId, req.user.id);
     const space = await createCourseSpace(Number(inserted.insertId), req.user.id);
-    return { id: Number(inserted.insertId), ...space };
+    return { id: Number(inserted.insertId), ...space, targets: normalized.targets };
   })();
   res.status(201).json({ ...result, message: '课程空间已创建，已按学院和班级自动加入匹配学生' });
 });
