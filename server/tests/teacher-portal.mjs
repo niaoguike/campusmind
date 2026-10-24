@@ -123,7 +123,7 @@ try {
       checks++;
     }
   }
-  const created = await call(registered.user.id, '/teacher/courses', 'POST', { name: 'New teaching class' }, 201);
+  const created = await call(registered.user.id, '/teacher/courses', 'POST', { name: 'New teaching class', college: 'Engineering', class_name: '1' }, 201);
   assert.equal((await call(registered.user.id, '/teacher/dashboard')).courses[0].id, created.id);
   await call(teacher, `/teacher/courses/${created.id}/analytics`, 'GET', undefined, 403);
   await call(student, '/teacher/courses', 'POST', { name: 'Unauthorized' }, 403);
