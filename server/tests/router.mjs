@@ -44,6 +44,8 @@ test('复合请求走 multi', () => {
 
 test('带附件一律走 multi', () => {
   assert.equal(routeComplexity('这是今天的课件', { hasAttachment: true }).mode, 'multi')
+  assert.equal(routeComplexity('', { hasAttachment: true }).mode, 'multi')
+  assert.equal(routeComplexity('你好', { hasAttachment: true }).mode, 'multi')
 })
 
 test('空格与全角标点不影响判断', () => {

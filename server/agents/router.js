@@ -38,9 +38,13 @@ export function routeComplexity (content, { hasAttachment = false } = {}) {
   const raw = String(content || '').trim()
   const text = raw.replace(/\s+/g, '')
 
-  if (!text) return { mode: 'direct', role: null, intents: [], reason: '空输入' }
-  if (isDirectRequest(raw)) return { mode: 'direct', role: null, intents: [], reason: '闲聊或平台说明' }
+  if (!text.trim()) {
+    if (hasAttachment) return { mode: 'multi', role: null, intents: [], reason: '只有附件，需要读取附件正文' }
+    return { mode: 'direct', role: null, intents: [], reason: '空输入' }
+  }
+  // 带附件意味着必须读取附件正文，即使文字只是寒暄也应走多步编排。
   if (hasAttachment) return { mode: 'multi', role: null, intents: classifyIntents(text), reason: '带附件，需要多步处理' }
+  if (isDirectRequest(raw)) return { mode: 'direct', role: null, intents: [], reason: '闲聊或平台说明' }
 
   const intents = classifyIntents(text)
   if (intents.length >= 2 && COMPOSITE_PATTERN.test(text)) {

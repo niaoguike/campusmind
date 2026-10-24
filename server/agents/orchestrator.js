@@ -108,8 +108,12 @@ function dependencyContext (step, states) {
   })
 }
 
-export async function createLearningOrchestrator ({ content = '', model, user, tools, history = [], createSpecialist = (role, options) => FACTORIES[role](options), planningTimeoutMs = 15000 }) {
-  const plan = await planLearningTasks({ content, model, history, timeoutMs: planningTimeoutMs })
+export async function createLearningOrchestrator ({ content = '', model, user, tools, history = [], createSpecialist = (role, options) => FACTORIES[role](options), planningTimeoutMs = 15000, plan: injectedPlan = null }) {
+  // 复杂度路由可以注入一个已确定的单步计划，省掉一次规划调用（AGENT_ROUTER=1 才启用）。
+  // 注入的计划同样走 validateLearningPlan：角色越界、重复或依赖成环仍会被拒绝。
+  const plan = injectedPlan
+    ? { ...validateLearningPlan(injectedPlan), source: injectedPlan.source || 'inline' }
+    : await planLearningTasks({ content, model, history, timeoutMs: planningTimeoutMs })
   const finalAgent = plan.steps.length > 1 ? 'synthesis' : plan.intent
 
   return {

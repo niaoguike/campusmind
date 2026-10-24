@@ -23,6 +23,7 @@ import { createCourseResourceSearchTool } from './agents/retrievalAgent.js';
 import { createLearningStateTools } from './agents/learningStateAgent.js';
 import { createPlanDraftTool } from './agents/plannerAgent.js';
 import { createLearningOrchestrator } from './agents/orchestrator.js';
+import { routeComplexity } from './agents/router.js';
 import { createPersonalRunTrace } from './agents/personalRunTrace.js';
 import { buildThreadHistory, loadRecentThreadMessages } from './agents/contextBuilder.js';
 import { buildLearningReviewInput, getLearningState, recordLearningEvent, updateMasteryFromQuiz } from './agents/learningAnalytics.js';
@@ -2031,7 +2032,7 @@ async function supervisorActionsFor(user, content = '', actionIntent = {}) {
   }
   return actions;
 }
-async function createPersonalLearningRun(user, content, history) {
+async function createPersonalLearningRun(user, content, history, { hasAttachment = false } = {}) {
   const userId = user.id;
   const rewriteModel = process.env.RAG_QUERY_REWRITE === 'model' ? async ({ anchor, question, signal }) => {
     const answer = await llm.createModel(user, 0).invoke([
@@ -2045,12 +2046,27 @@ async function createPersonalLearningRun(user, content, history) {
   const createPlanDraft = createPlanDraftTool({ db, userId, now });
   const model = llm.createModel(user, 0.4);
 
+  // 复杂度路由（灰度，默认关闭）：设 AGENT_ROUTER=1 时，单一意图请求直接派给对应专业 Agent，
+  // 跳过 15 秒的规划调用；direct / multi 与未开启时仍走原有编排路径，行为不变。
+  // 附件正文是通过 history 注入的，content 里没有标记，因此由调用方显式传入 hasAttachment。
+  const route = process.env.AGENT_ROUTER === '1'
+    ? routeComplexity(content, { hasAttachment })
+    : null
+  const routerPlan = route?.mode === 'single'
+    ? {
+        intent: route.role,
+        source: 'router',
+        steps: [{ agent: route.role, task: '完成用户本轮请求中属于本角色的部分，始终以用户原始意图为准。', dependsOn: [] }]
+      }
+    : null
+
   return await createLearningOrchestrator({
     content,
     model,
     user,
     history,
-    tools: { search, snapshot, remember, createPlanDraft }
+    tools: { search, snapshot, remember, createPlanDraft },
+    plan: routerPlan
   });
 }
 async function eventLog({ actorUserId = null, targetUserId = null, runId = null, eventType, scope = {}, payload = {}, status = 'created' }) {
@@ -2398,7 +2414,7 @@ app.post('/api/agent/chat', auth, async (req, res) => {
     '当前处于“学习问答”。只提供课程解释、课程资料检索、练习辅导、学习建议、复盘和学习成果生成。不得创建或建议执行群发消息、论坛发布、资料移动、跨用户 Agent 委托或其他平台写操作；如果用户要求执行平台动作，请说明需要切换到“行动工作台”。' });
   let trace = null;
   try {
-    const orchestration = await createPersonalLearningRun(user, content, history);
+    const orchestration = await createPersonalLearningRun(user, content, history, { hasAttachment: attachments.length > 0 });
     trace = await createPersonalRunTrace({ db, now, eventLog, user, threadId, content, orchestration });
     const result = await orchestration.invoke({ messages: history, onStep: trace.onStep });
     let answer = result.answer;
