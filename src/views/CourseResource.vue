@@ -8,7 +8,7 @@
           <h1>课程资料库</h1>
           <p>上传讲义、笔记、题单和课件。文件会自动解析为可供专属 Agent 检索的正文；发布者可删除自己的资料，管理员可管理全部资料。</p>
         </div>
-        <button class="primary" @click="dialog = true">＋ 上传资料</button>
+        <button v-if="me.role === 'teacher' || me.is_admin" class="primary" @click="dialog = true">＋ 上传资料</button>
       </header>
 
       <section class="course-tabs">
@@ -55,7 +55,7 @@
       </section>
     </main>
 
-    <el-dialog v-model="dialog" title="上传课程资料" width="520px" :close-on-click-modal="false">
+    <el-dialog v-if="me.role === 'teacher' || me.is_admin" v-model="dialog" title="上传课程资料" width="520px" :close-on-click-modal="false">
       <el-form label-position="top">
         <el-form-item label="所属课程">
           <el-select v-model="form.course_id" style="width:100%"><el-option v-for="course in courses" :key="course.id" :label="course.name" :value="course.id" /></el-select>

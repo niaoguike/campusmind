@@ -22,6 +22,7 @@ import { api } from '../utils/api'
 import { ElMessage } from 'element-plus'
 import { setSession, clearSession, destinationForUser } from '../utils/session'
 import TeacherConsole from '../views/TeacherConsole.vue'
+import CourseSpaces from '../views/CourseSpaces.vue'
 
 const routes = [
   { path: '/', redirect: '/dashboard' },
@@ -35,6 +36,7 @@ const routes = [
   { path: '/favorites', component: Favorites },
   { path: '/schedule', component: Schedule },
   { path: '/messages', component: MessagesSocial },
+  { path: '/courses', component: CourseSpaces },
   { path: '/account', component: AccountCenter },
   { path: '/profile/:id', component: Profile },
   { path: '/friend-agent/:id', component: FriendAgentChat },

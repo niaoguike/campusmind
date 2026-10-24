@@ -53,8 +53,17 @@ try {
   await call(teacher, `/teacher/tasks/${task.id}/publish`, 'PATCH', {});
   assert.equal((await call(teacher, `/teacher/courses/${a}/tasks`))[0].pending_count, 0);
   await call(student, `/teacher-tasks/${task.id}/submit`, 'POST', { content: 'work' }, 403);
-  await call(student, `/courses/${a}/join`, 'POST', {});
-  await call(outsider, `/courses/${b}/join`, 'POST', {});
+  await call(student, `/courses/${a}/join`, 'POST', {}, 403);
+  await call(outsider, `/courses/${b}/join`, 'POST', {}, 403);
+  const spaceA = await db.prepare('SELECT invite_code FROM course_spaces WHERE course_id=?').get(a);
+  const spaceB = await db.prepare('SELECT invite_code FROM course_spaces WHERE course_id=?').get(b);
+  assert(spaceA?.invite_code && spaceB?.invite_code);
+  await call(student, '/courses/join', 'POST', { invite_code: spaceA.invite_code }, 201);
+  await call(outsider, '/courses/join', 'POST', { invite_code: spaceB.invite_code }, 201);
+  const studentJoin = await db.prepare("SELECT id FROM course_join_requests WHERE course_id=? AND student_id=?").get(a, student);
+  await call(teacher, `/teacher/course-join-requests/${studentJoin.id}`, 'PATCH', { action: 'approve' });
+  const outsiderJoin = await db.prepare("SELECT id FROM course_join_requests WHERE course_id=? AND student_id=?").get(b, outsider);
+  await call(other, `/teacher/course-join-requests/${outsiderJoin.id}`, 'PATCH', { action: 'approve' });
   await call(student, `/teacher-tasks/${task.id}/submit`, 'POST', { content: 'work' }, 201);
   const [submission] = await call(teacher, `/teacher/tasks/${task.id}/submissions`);
   await call(other, `/teacher/submissions/${submission.id}/grade`, 'PATCH', { score: 90 }, 403);
@@ -114,7 +123,7 @@ try {
       checks++;
     }
   }
-  const created = await call(registered.user.id, '/teacher/courses', 'POST', { name: 'New teaching class' }, 201);
+  const created = await call(registered.user.id, '/teacher/courses', 'POST', { name: 'New teaching class', college: 'Engineering', class_name: '1' }, 201);
   assert.equal((await call(registered.user.id, '/teacher/dashboard')).courses[0].id, created.id);
   await call(teacher, `/teacher/courses/${created.id}/analytics`, 'GET', undefined, 403);
   await call(student, '/teacher/courses', 'POST', { name: 'Unauthorized' }, 403);
