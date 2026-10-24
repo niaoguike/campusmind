@@ -424,6 +424,16 @@ async function createCourseSpace(courseId, teacherId) {
   const course = await courseOf(courseId),teacher = await userOf(teacherId);
   if (!course || !teacher) throw new Error('课程或教师不存在');
   const title = [course.name, course.college, course.class_name, teacher.name].filter(Boolean).join('-').slice(0, 120);
+  const existing = await db.prepare('SELECT * FROM course_spaces WHERE course_id=?').get(courseId);
+  if (existing) {
+    await db.prepare('UPDATE courses SET teacher=? WHERE id=?').run(teacher.name, courseId);
+    await db.prepare('UPDATE conversations SET title=?,owner_id=? WHERE id=?').run(title, teacherId, existing.conversation_id);
+    await db.prepare('DELETE FROM group_agents WHERE conversation_id=?').run(existing.conversation_id);
+    await db.prepare('INSERT INTO conversation_members (conversation_id,user_id) VALUES (?,?) ON CONFLICT DO NOTHING').run(existing.conversation_id, teacherId);
+    await db.prepare('INSERT INTO group_agents (conversation_id,user_id,auto_reply) VALUES (?,?,0) ON CONFLICT DO NOTHING').run(existing.conversation_id, teacherId);
+    const autoEnrolled = await syncCourseClassMembers(courseId);
+    return { conversation_id: Number(existing.conversation_id), invite_code: existing.invite_code, title, auto_enrolled: autoEnrolled };
+  }
   const conversation = await db.prepare("INSERT INTO conversations (title,type,owner_id) VALUES (?, 'group', ?)").run(title, teacherId);
   const inviteCode = await courseInviteCode();
   await db.prepare('INSERT INTO course_spaces (course_id,conversation_id,invite_code) VALUES (?,?,?)').run(courseId, conversation.insertId, inviteCode);
@@ -2530,8 +2540,7 @@ app.post('/api/admin/users/:id/teacher', auth, requireAdmin, async (req, res) =>
   if (user.role === 'admin') return res.status(400).json({ error: '请求无效或无权访问，请检查课程权限与输入' });
   if (!Array.isArray(ids) || (await someAsync(ids, async (id) => !Number.isSafeInteger(id) || !(await db.prepare('SELECT 1 FROM courses WHERE id=?').get(id))))) return res.status(400).json({ error: '请求无效或无权访问，请检查课程权限与输入' });
   const assignedCourseIds = [...new Set(ids)];
-  await db.transaction(async () => {await db.prepare("UPDATE users SET role='teacher' WHERE id=?").run(user.id);await db.prepare('DELETE FROM course_teacher_assignments WHERE user_id=?').run(user.id);for (const id of assignedCourseIds) await db.prepare('INSERT INTO course_teacher_assignments (course_id,user_id) VALUES (?,?)').run(id, user.id);})();
-  for (const courseId of assignedCourseIds) await createCourseSpace(courseId, user.id);
+  await db.transaction(async () => {await db.prepare("UPDATE users SET role='teacher' WHERE id=?").run(user.id);await db.prepare('DELETE FROM course_teacher_assignments WHERE user_id=?').run(user.id);for (const id of assignedCourseIds) { await db.prepare('INSERT INTO course_teacher_assignments (course_id,user_id) VALUES (?,?)').run(id, user.id); await createCourseSpace(id, user.id); }})();
   await auditLog(req.user.id, 'assign_teacher', user, `负责课程：${ids.join(',')}`);res.json({ message: '操作已保存' });
 });
 app.post('/api/teacher/courses/:courseId/tasks', auth, requireCourseTeacher, async (req, res) => {const title = String(req.body.title || '').trim(),description = String(req.body.description || '').trim();if (req.body.due_at && !Number.isFinite(Date.parse(req.body.due_at))) return res.status(400).json({ error: '截止时间无效' });if (!['practice', 'reading', 'assignment', 'discussion'].includes(req.body.task_type || 'practice')) return res.status(400).json({ error: '任务类型无效' });if (!title) return res.status(400).json({ error: '请填写任务标题' });const result = await db.prepare('INSERT INTO teacher_tasks (course_id,teacher_id,title,description,task_type,due_at,published,created_at) VALUES (?,?,?,?,?,?,?,?)').run(req.courseId, req.user.id, title.slice(0, 160), description.slice(0, 4000), String(req.body.task_type || 'practice').slice(0, 30), String(req.body.due_at || '').slice(0, 40), req.body.published ? 1 : 0, now());res.status(201).json({ id: Number(result.insertId), message: req.body.published ? '任务已发布' : '任务草稿已保存' });});
