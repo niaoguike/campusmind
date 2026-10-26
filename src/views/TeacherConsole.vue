@@ -1,6 +1,6 @@
 <template>
   <div class="teacher"><AppNav/><main v-loading="loading">
-    <header><div><small>TEACHER CONSOLE</small><h1>教师工作台</h1></div><el-select v-model="courseId" placeholder="选择负责课程" @change="loadCourse"><el-option v-for="c in dashboard.courses" :key="c.id" :label="c.name" :value="c.id"/></el-select><el-button @click="courseDialog=true">创建任教课程</el-button></header>
+    <header><div><small>TEACHER CONSOLE</small><h1>教师工作台</h1></div><el-select v-model="courseId" placeholder="选择负责课程" @change="loadCourse"><el-option v-for="c in dashboard.courses" :key="c.id" :label="c.name" :value="c.id"/></el-select><el-button @click="courseDialog=true">创建任教课程</el-button><el-button v-if="courseId" type="danger" plain @click="archiveCourse">删除当前课程</el-button></header>
     <section class="stats"><article>负责课程 <b>{{ dashboard.summary.course_count }}</b></article><article>课程任务 <b>{{ dashboard.summary.task_count }}</b></article><article>待批改 <b>{{ dashboard.summary.pending_grading }}</b></article></section>
     <el-empty v-if="!dashboard.courses.length" description="尚无任教课程，点击“创建任教课程”开始教学"/>
     <el-tabs v-else v-model="tab">
@@ -22,7 +22,7 @@
 </template>
 <script setup>
 import {computed,onMounted,ref} from 'vue'
-import {ElMessage} from 'element-plus'
+import {ElMessage,ElMessageBox} from 'element-plus'
 import AppNav from '../components/AppNav.vue'
 import {api} from '../utils/api'
 const dashboard=ref({courses:[],summary:{}}),courseId=ref(),tab=ref('overview'),loading=ref(false),busy=ref(false),aiBusy=ref(false)
@@ -46,6 +46,7 @@ async function preview(r){try{const response=await fetch(`/api/teacher/resources
 async function generateAdvice(){const id=courseId.value;aiBusy.value=true;advice.value=null;try{const result=await api(`/teacher/courses/${id}/ai-advice`,{method:'POST'});if(id===courseId.value)advice.value=result}catch(e){ElMessage.error(e.message)}finally{aiBusy.value=false}}
 const courseDialog=ref(false),courseName=ref(''),courseCollege=ref(''),courseClass=ref(''),creatingCourse=ref(false)
 async function createCourse(){if(!courseName.value.trim()||!courseCollege.value.trim()||!courseClass.value.trim())return ElMessage.warning('请填写课程名称、学院和班级');creatingCourse.value=true;try{const result=await api('/teacher/courses',{method:'POST',body:JSON.stringify({name:courseName.value,college:courseCollege.value,class_name:courseClass.value})});courseId.value=result.id;courseDialog.value=false;courseName.value='';courseCollege.value='';courseClass.value='';await load();ElMessage.success(`${result.message}，邀请码：${result.invite_code}`)}catch(e){ElMessage.error(e.message)}finally{creatingCourse.value=false}}
+async function archiveCourse(){if(!courseId.value)return;try{await ElMessageBox.confirm('课程将从教师端隐藏，资料、作业、成员和聊天记录会保留。确认删除吗？','删除课程',{confirmButtonText:'确认删除',cancelButtonText:'取消',type:'warning'});const id=courseId.value;const result=await api(`/teacher/courses/${id}`,{method:'DELETE'});ElMessage.success(result.message);courseId.value=undefined;await load()}catch(e){if(e!=='cancel'&&e!=='close')ElMessage.error(e.message)}}
 async function reviewJoin(request,action){try{const result=await api(`/teacher/course-join-requests/${request.id}`,{method:'PATCH',body:JSON.stringify({action})});ElMessage.success(result.message);await loadCourse()}catch(e){ElMessage.error(e.message)}}
 async function syncMembers(){try{const result=await api(`/teacher/courses/${courseId.value}/sync-members`,{method:'POST'});ElMessage.success(`${result.message}：${result.auto_enrolled} 人`);await loadCourse()}catch(e){ElMessage.error(e.message)}}
 async function regenerateInvite(){try{const result=await api(`/teacher/courses/${courseId.value}/regenerate-invite`,{method:'POST'});courseSpace.value.invite_code=result.invite_code;ElMessage.success(result.message)}catch(e){ElMessage.error(e.message)}}

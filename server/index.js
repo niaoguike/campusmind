@@ -50,11 +50,11 @@ const smsEnabled = Object.values(SMS_CONFIG).every(Boolean);
 let smsClient = null;
 async function backfillIdentityNormalization(db) {
   await db.transaction(async () => {
-    const users = await db.prepare('SELECT id,college,class,college_raw,class_raw,college_key,class_key FROM users').all();
+    const users = await db.prepare('SELECT id,college,class,college_raw,class_raw,college_key,class_key,grade_key,college_code FROM users').all();
     for (const user of users) {
       const normalized = normalizeStudentIdentity(user.college_raw || user.college, user.class_raw || user.class);
       if (normalized.ok) {
-        await db.prepare('UPDATE users SET college=?,class=?,college_raw=?,class_raw=?,college_key=?,class_key=? WHERE id=?').run(normalized.college, normalized.className, normalized.collegeRaw, normalized.classRaw, normalized.collegeKey, normalized.classKey, user.id);
+        await db.prepare('UPDATE users SET college=?,class=?,college_raw=?,class_raw=?,college_key=?,class_key=?,grade_key=?,college_code=? WHERE id=?').run(normalized.college, normalized.className, normalized.collegeRaw, normalized.classRaw, normalized.collegeKey, normalized.classKey, normalized.gradeKey || '', normalized.collegeCode || '', user.id);
       } else if (!user.college_raw || !user.class_raw) {
         await db.prepare('UPDATE users SET college_raw=COALESCE(NULLIF(college_raw,\'\'),?),class_raw=COALESCE(NULLIF(class_raw,\'\'),?) WHERE id=?').run(user.college, user.class, user.id);
       }
@@ -67,7 +67,15 @@ async function backfillIdentityNormalization(db) {
       if (!normalized.ok) continue;
       await db.prepare('UPDATE courses SET college=?,class_name=?,college_raw=?,class_name_raw=? WHERE id=?').run(normalized.college, normalized.className, normalized.collegeRaw, normalized.classRaw, course.id);
       await db.prepare('DELETE FROM course_targets WHERE course_id=?').run(course.id);
-      for (const target of normalizedTargetRows(normalized)) await db.prepare('INSERT INTO course_targets (course_id,college_key,college,class_key,class_name) VALUES (?,?,?,?,?) ON CONFLICT DO NOTHING').run(course.id, target.collegeKey, target.college, target.classKey, target.className);
+       for (const target of normalizedTargetRows(normalized)) await db.prepare('INSERT INTO course_targets (course_id,college_key,college,grade_key,class_key,class_name) VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING').run(course.id, target.collegeKey, target.college, target.gradeKey || '', target.classKey, target.className);
+    }
+    const spaces = await db.prepare('SELECT course_id,conversation_id FROM course_spaces').all();
+    const studentsForCourse = db.prepare(`SELECT u.id FROM users u WHERE u.role='student' AND EXISTS (SELECT 1 FROM course_targets t WHERE t.course_id=? AND t.college_key=u.college_key AND (t.grade_key='' OR t.grade_key=u.grade_key) AND t.class_key=u.class_key)`);
+    for (const space of spaces) {
+      for (const student of await studentsForCourse.all(space.course_id)) {
+        await db.prepare('INSERT INTO course_student_memberships (course_id,student_id) VALUES (?,?) ON CONFLICT DO NOTHING').run(space.course_id, student.id);
+        await db.prepare('INSERT INTO conversation_members (conversation_id,user_id) VALUES (?,?) ON CONFLICT DO NOTHING').run(space.conversation_id, student.id);
+      }
     }
   })();
 }
@@ -416,8 +424,8 @@ const member = async (id, userId) => !!(await db.prepare('SELECT 1 FROM conversa
 const conversationOf = async (id) => await db.prepare('SELECT * FROM conversations WHERE id=?').get(id);
 const ownerOf = async (id, userId) => !!(await db.prepare('SELECT 1 FROM conversations WHERE id=? AND owner_id=?').get(id, userId));
 const friends = async (left, right) => !!(await db.prepare('SELECT 1 FROM friendships WHERE user_id=? AND friend_id=?').get(left, right));
-const courseOf = async (courseId) => await db.prepare('SELECT c.*,a.user_id AS teacher_id,u.name AS teacher_name FROM courses c LEFT JOIN course_teacher_assignments a ON a.course_id=c.id LEFT JOIN users u ON u.id=a.user_id WHERE c.id=? ORDER BY a.user_id LIMIT 1').get(courseId);
-const courseSpaceOf = async (courseId) => await db.prepare('SELECT s.*,c.name,c.teacher,c.college,c.class_name,c.teacher AS course_teacher FROM course_spaces s JOIN courses c ON c.id=s.course_id WHERE s.course_id=?').get(courseId);
+const courseOf = async (courseId) => await db.prepare("SELECT c.*,a.user_id AS teacher_id,u.name AS teacher_name FROM courses c LEFT JOIN course_teacher_assignments a ON a.course_id=c.id LEFT JOIN users u ON u.id=a.user_id WHERE c.id=? AND COALESCE(c.archived_at,'')='' ORDER BY a.user_id LIMIT 1").get(courseId);
+const courseSpaceOf = async (courseId) => await db.prepare("SELECT s.*,c.name,c.teacher,c.college,c.class_name,c.teacher AS course_teacher FROM course_spaces s JOIN courses c ON c.id=s.course_id WHERE s.course_id=? AND COALESCE(c.archived_at,'')=''").get(courseId);
 const courseIdForConversation = async (conversationId) => (await db.prepare('SELECT course_id FROM course_spaces WHERE conversation_id=?').get(conversationId))?.course_id || null;
 async function isCourseMember(courseId, userId) {
   return !!(await managesCourse(userId, courseId) || await db.prepare('SELECT 1 FROM course_student_memberships WHERE course_id=? AND student_id=?').get(courseId, userId));
@@ -437,15 +445,15 @@ async function courseInviteCode() {
 }
 async function saveCourseTargets(courseId, normalized) {
   await db.prepare('DELETE FROM course_targets WHERE course_id=?').run(courseId);
-  for (const target of normalizedTargetRows(normalized)) await db.prepare('INSERT INTO course_targets (course_id,college_key,college,class_key,class_name) VALUES (?,?,?,?,?) ON CONFLICT DO NOTHING').run(courseId, target.collegeKey, target.college, target.classKey, target.className);
+  for (const target of normalizedTargetRows(normalized)) await db.prepare('INSERT INTO course_targets (course_id,college_key,college,grade_key,class_key,class_name) VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING').run(courseId, target.collegeKey, target.college, target.gradeKey || '', target.classKey, target.className);
 }
 async function courseTargetsOf(course) {
-  let targets = await db.prepare('SELECT college_key,college,class_key,class_name FROM course_targets WHERE course_id=? ORDER BY college_key,class_key').all(course.id);
+  let targets = await db.prepare('SELECT college_key,college,grade_key,class_key,class_name FROM course_targets WHERE course_id=? ORDER BY college_key,grade_key,class_key').all(course.id);
   if (targets.length) return targets;
   const normalized = normalizeCourseTargets(course.college_raw || course.college, course.class_name_raw || course.class_name);
   if (!normalized.ok) return [];
   await saveCourseTargets(course.id, normalized);
-  targets = await db.prepare('SELECT college_key,college,class_key,class_name FROM course_targets WHERE course_id=? ORDER BY college_key,class_key').all(course.id);
+  targets = await db.prepare('SELECT college_key,college,grade_key,class_key,class_name FROM course_targets WHERE course_id=? ORDER BY college_key,grade_key,class_key').all(course.id);
   return targets;
 }
 async function syncCourseClassMembers(courseId) {
@@ -456,7 +464,7 @@ async function syncCourseClassMembers(courseId) {
   const students = await db.prepare(`SELECT u.id FROM users u
     WHERE u.role='student' AND EXISTS (
       SELECT 1 FROM course_targets t
-      WHERE t.course_id=? AND t.college_key=u.college_key AND t.class_key=u.class_key
+       WHERE t.course_id=? AND t.college_key=u.college_key AND (t.grade_key='' OR t.grade_key=u.grade_key) AND t.class_key=u.class_key
     )`).all(course.id);
   const addMembership = db.prepare('INSERT INTO course_student_memberships (course_id,student_id) VALUES (?,?) ON CONFLICT DO NOTHING');
   const addConversationMember = db.prepare('INSERT INTO conversation_members (conversation_id,user_id) VALUES (?,?) ON CONFLICT DO NOTHING');
@@ -699,7 +707,7 @@ async function executeGroupAgentDiscussion(runId) {
 const isAdmin = async (userId) => (await userOf(userId))?.role === 'admin';
 const isTeacher = async (userId) => ['teacher', 'admin'].includes((await userOf(userId))?.role);
 async function managesCourse(userId, courseId) {return (await isAdmin(userId)) || (await isTeacher(userId)) && !!(await db.prepare('SELECT 1 FROM course_teacher_assignments WHERE course_id=? AND user_id=?').get(courseId, userId));}
-async function requireCourseTeacher(req, res, next) {const courseId = Number(req.params.courseId || req.params.course_id || req.body.course_id || 0);if (!courseId || !(await db.prepare('SELECT 1 FROM courses WHERE id=?').get(courseId))) return res.status(404).json({ error: '课程不存在' });if (!(await managesCourse(req.user.id, courseId))) return res.status(403).json({ error: '只能管理自己负责的课程' });req.courseId = courseId;next();}
+async function requireCourseTeacher(req, res, next) {const courseId = Number(req.params.courseId || req.params.course_id || req.body.course_id || 0);if (!courseId || !(await db.prepare("SELECT 1 FROM courses WHERE id=? AND COALESCE(archived_at,'')=''").get(courseId))) return res.status(404).json({ error: '课程不存在或已归档' });if (!(await managesCourse(req.user.id, courseId))) return res.status(403).json({ error: '只能管理自己负责的课程' });req.courseId = courseId;next();}
 async function bootstrapAdmin() {const studentId = (process.env.ADMIN_STUDENT_ID || '').trim(),password = process.env.ADMIN_PASSWORD || '';if (!studentId) return;const existing = await db.prepare('SELECT id FROM users WHERE student_id=?').get(studentId);if (existing) {await db.prepare("UPDATE users SET role='admin' WHERE id=?").run(existing.id);return;}if (!password) return;await db.prepare("INSERT INTO users (student_id,name,phone,college,class,password,role) VALUES (?,?,?,?,?,?, 'admin')").run(studentId, (process.env.ADMIN_NAME || 'CampusMind 管理员').slice(0, 40), '管理员', (process.env.ADMIN_COLLEGE || 'CampusMind 平台').slice(0, 60), '系统管理员', hashPassword(password));}
 await bootstrapAdmin();
 if (!(await db.prepare('SELECT 1 FROM announcements LIMIT 1').get())) {
@@ -862,7 +870,7 @@ app.post('/api/register', async (req, res) => {
   if (typeof password !== 'string' || password.length < 6 || password.length > 128) return res.status(400).json({ error: '密码需为6至128位' });
   if (await db.prepare('SELECT 1 FROM users WHERE student_id=? OR phone=?').get(account, phone)) return res.status(409).json({ error: '该学号、工号或手机号已注册，请直接登录' });
   try {
-    const result = await db.prepare('INSERT INTO users (student_id,name,phone,college,class,password,role,college_raw,class_raw,college_key,class_key) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(account, name, phone, college, className, hashPassword(password), role, normalizedStudent?.collegeRaw || rawCollege, normalizedStudent?.classRaw || rawClass, normalizedStudent?.collegeKey || '', normalizedStudent?.classKey || '');
+    const result = await db.prepare('INSERT INTO users (student_id,name,phone,college,class,password,role,college_raw,class_raw,college_key,class_key,grade_key,college_code) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run(account, name, phone, college, className, hashPassword(password), role, normalizedStudent?.collegeRaw || rawCollege, normalizedStudent?.classRaw || rawClass, normalizedStudent?.collegeKey || '', normalizedStudent?.classKey || '', normalizedStudent?.gradeKey || '', normalizedStudent?.collegeCode || '');
     const user = await userOf(Number(result.insertId));
     res.status(201).json({ message: '注册成功', token: tokenForUser(user), user: publicUser(user) });
   } catch {res.status(409).json({ error: '注册失败，请检查账号是否已注册' });}
@@ -880,7 +888,7 @@ app.post('/api/user/apikey', auth, async (req, res) => {const apiKey = (req.body
 app.delete('/api/user/apikey', auth, async (req, res) => {await db.prepare("UPDATE users SET api_key='' WHERE id=?").run(req.user.id);res.json({ message: '模型配置已删除' });});
 
 app.get('/api/dashboard', auth, async (req, res) => {const id = req.user.id;res.json({ user: publicUser(await userOf(id)), today: await db.prepare('SELECT * FROM schedules WHERE user_id=? ORDER BY start_time').all(id), plans: await db.prepare("SELECT * FROM study_plans WHERE user_id=? AND status!='done' ORDER BY id DESC LIMIT 4").all(id), resourceCount: (await db.prepare('SELECT COUNT(*) count FROM resources').get()).count, friendCount: (await db.prepare('SELECT COUNT(*) count FROM friendships WHERE user_id=?').get(id)).count, agentMemory: (await db.prepare('SELECT content FROM agent_memories WHERE user_id=? AND memory_key=?').get(id, 'learning_profile'))?.content || '' });});
-app.get('/api/courses', auth, async (req, res) => res.json(await filterAsync(await db.prepare('SELECT c.*, (SELECT COUNT(*) FROM resources r WHERE r.course_id=c.id) resource_count FROM courses c ORDER BY c.id').all(), async (c) => (await userOf(req.user.id)).role !== 'teacher' || (await managesCourse(req.user.id, c.id)))));
+app.get('/api/courses', auth, async (req, res) => res.json(await filterAsync(await db.prepare("SELECT c.*, (SELECT COUNT(*) FROM resources r WHERE r.course_id=c.id) resource_count FROM courses c WHERE COALESCE(c.archived_at,'')='' ORDER BY c.id").all(), async (c) => (await userOf(req.user.id)).role !== 'teacher' || (await managesCourse(req.user.id, c.id)))));
 app.get('/api/resources/files/:fileName', (req, res) => {const fileName = path.basename(req.params.fileName);if (fileName !== req.params.fileName) return res.status(404).end();const filePath = path.join(resourceUploadDir, fileName);res.sendFile(filePath, (error) => {if (error && !res.headersSent) res.status(error.code === 'ENOENT' ? 404 : 500).json({ error: '资料文件不存在或暂时无法打开' });});});
 app.get('/api/resources', auth, async (req, res) => {const query = (req.query.query || '').trim(),courseId = Number(req.query.course_id || 0);if (courseId && !(await isCourseMember(courseId, req.user.id))) return res.status(403).json({ error: '请先加入本课程' });let sql = "SELECT r.*,c.name course_name,u.name uploader_name,f.name folder_name,f.description folder_description,f.tags folder_tags,COALESCE(d.status,CASE WHEN r.file_path!='' THEN 'pending' ELSE 'not_applicable' END) ingestion_status,COALESCE(d.error_message,'') ingestion_error,COALESCE(d.chunk_count,0) chunk_count FROM resources r JOIN courses c ON c.id=r.course_id LEFT JOIN users u ON u.id=r.uploader_id LEFT JOIN resource_folders f ON f.id=r.folder_id LEFT JOIN resource_documents d ON d.resource_id=r.id WHERE 1=1",values = [];if (courseId) {sql += ' AND r.course_id=?';values.push(courseId);}if (query) {sql += " AND (r.title ILIKE ? OR r.description ILIKE ? OR r.tags ILIKE ? OR r.file_name ILIKE ? OR f.name ILIKE ? OR r.relative_path ILIKE ?)";values.push(`%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`);}res.json(await db.prepare(`${sql} ORDER BY r.is_pinned DESC,r.folder_id DESC,r.relative_path ASC,r.id DESC`).all(...values));});
 app.get('/api/resource-folders/:id', auth, async (req, res) => {const folder = await db.prepare("SELECT f.*,c.name course_name,c.color,u.name uploader_name FROM resource_folders f JOIN courses c ON c.id=f.course_id LEFT JOIN users u ON u.id=f.uploader_id WHERE f.id=?").get(req.params.id);if (!folder) return res.status(404).json({ error: '资料文件夹不存在' });const resources = await db.prepare("SELECT r.*,COALESCE(d.status,CASE WHEN r.file_path!='' THEN 'pending' ELSE 'not_applicable' END) ingestion_status,COALESCE(d.error_message,'') ingestion_error,COALESCE(d.chunk_count,0) chunk_count FROM resources r LEFT JOIN resource_documents d ON d.resource_id=r.id WHERE r.folder_id=? ORDER BY r.relative_path ASC,r.id ASC").all(folder.id);res.json({ folder, resources });});
@@ -2513,10 +2521,10 @@ app.get('/api/courses/spaces', auth, async (req, res) => {
   const user = await userOf(req.user.id),teacher = user.role === 'teacher' || user.role === 'admin';
   const rows = teacher
     ? await db.prepare(`SELECT c.*,s.conversation_id,s.invite_code,1 AS is_teacher,COUNT(DISTINCT m.student_id) AS member_count
-      FROM courses c JOIN course_teacher_assignments a ON a.course_id=c.id AND a.user_id=? JOIN course_spaces s ON s.course_id=c.id
+       FROM courses c JOIN course_teacher_assignments a ON a.course_id=c.id AND a.user_id=? JOIN course_spaces s ON s.course_id=c.id AND COALESCE(c.archived_at,'')=''
       LEFT JOIN course_student_memberships m ON m.course_id=c.id GROUP BY c.id,s.id ORDER BY c.id DESC`).all(req.user.id)
     : await db.prepare(`SELECT c.*,s.conversation_id,s.invite_code,0 AS is_teacher,COUNT(DISTINCT m2.student_id) AS member_count
-      FROM courses c JOIN course_student_memberships m ON m.course_id=c.id AND m.student_id=? JOIN course_spaces s ON s.course_id=c.id
+       FROM courses c JOIN course_student_memberships m ON m.course_id=c.id AND m.student_id=? JOIN course_spaces s ON s.course_id=c.id AND COALESCE(c.archived_at,'')=''
       LEFT JOIN course_student_memberships m2 ON m2.course_id=c.id GROUP BY c.id,s.id ORDER BY c.id DESC`).all(req.user.id);
   res.json(rows);
 });
@@ -2550,7 +2558,7 @@ app.get('/api/courses/:courseId/discussions', auth, async (req, res) => {
 app.post('/api/courses/join', auth, async (req, res) => {
   if ((await userOf(req.user.id)).role !== 'student') return res.status(403).json({ error: '只有学生可以申请加入课程' });
   const code = String(req.body.invite_code || '').trim().toUpperCase();if (!code) return res.status(400).json({ error: '请输入邀请码' });
-  const space = await db.prepare('SELECT course_id FROM course_spaces WHERE invite_code=?').get(code);if (!space) return res.status(404).json({ error: '邀请码不存在或已失效' });
+  const space = await db.prepare("SELECT s.course_id FROM course_spaces s JOIN courses c ON c.id=s.course_id AND COALESCE(c.archived_at,'')='' WHERE s.invite_code=?").get(code);if (!space) return res.status(404).json({ error: '邀请码不存在或已失效' });
   const existing = await db.prepare('SELECT status FROM course_join_requests WHERE course_id=? AND student_id=?').get(space.course_id, req.user.id);
   if (await db.prepare('SELECT 1 FROM course_student_memberships WHERE course_id=? AND student_id=?').get(space.course_id, req.user.id)) return res.json({ status: 'approved', message: '你已经在本课程中' });
   await db.prepare(`INSERT INTO course_join_requests (course_id,student_id,status,requested_at,reviewed_at,reviewed_by,review_note) VALUES (?,?,'pending',?,'',NULL,'')
@@ -2581,7 +2589,14 @@ app.post('/api/teacher/courses', auth, async (req, res) => {
   })();
   res.status(201).json({ ...result, message: '课程空间已创建，已按学院和班级自动加入匹配学生' });
 });
-app.get('/api/teacher/dashboard', auth, async (req, res) => {if (!(await isTeacher(req.user.id))) return res.status(403).json({ error: '仅教师可访问' });const courses = await db.prepare(`SELECT c.*,COUNT(DISTINCT r.id) resource_count FROM courses c LEFT JOIN resources r ON r.course_id=c.id WHERE c.id IN (SELECT course_id FROM course_teacher_assignments WHERE user_id=?) GROUP BY c.id ORDER BY c.id DESC`).all(req.user.id);const courseIds = courses.map((c) => c.id);const tasks = courseIds.length ? (await db.prepare(`SELECT COUNT(*) count FROM teacher_tasks WHERE course_id IN (${courseIds.map(() => '?').join(',')})`).get(...courseIds)).count : 0;const pending = courseIds.length ? (await db.prepare(`SELECT COUNT(*) count FROM teacher_task_submissions s JOIN teacher_tasks t ON t.id=s.task_id WHERE t.course_id IN (${courseIds.map(() => '?').join(',')}) AND s.score IS NULL`).get(...courseIds)).count : 0;res.json({ courses, summary: { course_count: courses.length, task_count: tasks, pending_grading: pending } });});
+app.delete('/api/teacher/courses/:courseId', auth, requireCourseTeacher, async (req, res) => {
+  await db.transaction(async () => {
+    await db.prepare('UPDATE courses SET archived_at=? WHERE id=?').run(now(), req.courseId);
+    await db.prepare('UPDATE course_spaces SET invite_code=? WHERE course_id=?').run(`ARCHIVED-${req.courseId}-${Date.now()}`, req.courseId);
+  })();
+  res.json({ message: '课程已归档，已从教师端隐藏，资料、作业和聊天记录已保留' });
+});
+app.get('/api/teacher/dashboard', auth, async (req, res) => {if (!(await isTeacher(req.user.id))) return res.status(403).json({ error: '仅教师可访问' });const courses = await db.prepare(`SELECT c.*,COUNT(DISTINCT r.id) resource_count FROM courses c LEFT JOIN resources r ON r.course_id=c.id WHERE COALESCE(c.archived_at,'')='' AND c.id IN (SELECT course_id FROM course_teacher_assignments WHERE user_id=?) GROUP BY c.id ORDER BY c.id DESC`).all(req.user.id);const courseIds = courses.map((c) => c.id);const tasks = courseIds.length ? (await db.prepare(`SELECT COUNT(*) count FROM teacher_tasks WHERE course_id IN (${courseIds.map(() => '?').join(',')})`).get(...courseIds)).count : 0;const pending = courseIds.length ? (await db.prepare(`SELECT COUNT(*) count FROM teacher_task_submissions s JOIN teacher_tasks t ON t.id=s.task_id WHERE t.course_id IN (${courseIds.map(() => '?').join(',')}) AND s.score IS NULL`).get(...courseIds)).count : 0;res.json({ courses, summary: { course_count: courses.length, task_count: tasks, pending_grading: pending } });});
 app.get('/api/admin/users/:id/teacher', auth, requireAdmin, async (req, res) => res.json({ course_ids: (await db.prepare('SELECT course_id FROM course_teacher_assignments WHERE user_id=?').all(req.params.id)).map((x) => x.course_id) }));
 app.post('/api/admin/users/:id/teacher', auth, requireAdmin, async (req, res) => {
   const user = await userOf(Number(req.params.id)),ids = req.body.course_ids;
@@ -2608,7 +2623,7 @@ async function courseAnalytics(courseId) {
   return { student_count: students.length, published_tasks: total, students, at_risk_students: students.filter((s) => s.at_risk), notice: '仅统计本课程已加入学生的教师任务，未提交或均分低于60分为跟进提示。' };
 }
 app.get('/api/teacher/courses/:courseId/analytics', auth, requireCourseTeacher, async (req, res) => res.json(await courseAnalytics(req.courseId)));
-app.get('/api/teacher/courses', auth, async (req, res) => {if (!(await isTeacher(req.user.id))) return res.status(403).json({ error: '请求无效或无权访问，请检查课程权限与输入' });res.json(await db.prepare('SELECT c.* FROM courses c JOIN course_teacher_assignments a ON a.course_id=c.id WHERE a.user_id=?').all(req.user.id));});
+app.get('/api/teacher/courses', auth, async (req, res) => {if (!(await isTeacher(req.user.id))) return res.status(403).json({ error: '请求无效或无权访问，请检查课程权限与输入' });res.json(await db.prepare("SELECT c.* FROM courses c JOIN course_teacher_assignments a ON a.course_id=c.id WHERE a.user_id=? AND COALESCE(c.archived_at,'')=''").all(req.user.id));});
 app.get('/api/teacher/courses/:courseId/join-requests', auth, requireCourseTeacher, async (req, res) => res.json(await db.prepare(`SELECT r.*,u.name,u.student_id,u.college,u.class,u.avatar FROM course_join_requests r JOIN users u ON u.id=r.student_id WHERE r.course_id=? ORDER BY CASE r.status WHEN 'pending' THEN 0 ELSE 1 END,r.id DESC`).all(req.courseId)));
 app.patch('/api/teacher/course-join-requests/:requestId', auth, async (req, res) => {
   const request = await db.prepare('SELECT * FROM course_join_requests WHERE id=?').get(req.params.requestId);if (!request || !(await managesCourse(req.user.id, request.course_id))) return res.status(404).json({ error: '加入申请不存在或无权处理' });

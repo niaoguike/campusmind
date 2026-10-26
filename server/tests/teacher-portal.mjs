@@ -125,19 +125,24 @@ try {
   }
   const created = await call(registered.user.id, '/teacher/courses', 'POST', { name: 'New teaching class', college: 'Engineering', class_name: '1' }, 201);
   assert.equal((await call(registered.user.id, '/teacher/dashboard')).courses[0].id, created.id);
+  await call(registered.user.id, `/teacher/courses/${created.id}`, 'DELETE');
+  assert.equal((await call(registered.user.id, '/teacher/dashboard')).courses.length, 0);
   await call(teacher, `/teacher/courses/${created.id}/analytics`, 'GET', undefined, 403);
   await call(student, '/teacher/courses', 'POST', { name: 'Unauthorized' }, 403);
   await call(registered.user.id, '/teacher/courses', 'POST', { name: ' ' }, 400);
   const normalizedStudent = await call(student, '/register', 'POST', { student_id: '88000001', name: 'Software student', phone: '13812340002', college: '软件学院', class: '软件13班', password: 'secure-test-password' }, 201);
   assert.equal(normalizedStudent.user.college, '软件学院');
   assert.equal(normalizedStudent.user.class, '13');
+  const compactStudent = await call(student, '/register', 'POST', { student_id: '88000004', name: 'Compact software student', phone: '13812340005', college: '软件学院', class: '552413', password: 'secure-test-password' }, 201);
+  assert.equal(compactStudent.user.class, '13');
+  assert.equal((await db.prepare('SELECT grade_key,college_code FROM users WHERE id=?').get(compactStudent.user.id)).grade_key, '24');
   const normalizedComputerStudent = await call(student, '/register', 'POST', { student_id: '88000002', name: 'Computer student', phone: '13812340003', college: '计算机科学与技术学院', class: '2班', password: 'secure-test-password' }, 201);
   const normalizedCourse = await call(registered.user.id, '/teacher/courses', 'POST', { name: 'Normalized target course', college: '软件学院和计算机科学与技术学院', class_name: '软件13班和计算机2班' }, 201);
-  assert.deepEqual((await db.prepare('SELECT college_key,class_key FROM course_targets WHERE course_id=? ORDER BY college_key,class_key').all(normalizedCourse.id)), [
-    { college_key: '计算机科学与技术', class_key: '2' },
-    { college_key: '软件', class_key: '13' }
+  assert.deepEqual((await db.prepare('SELECT college_key,grade_key,class_key FROM course_targets WHERE course_id=? ORDER BY college_key,class_key').all(normalizedCourse.id)), [
+    { college_key: '计算机科学与技术', grade_key: '', class_key: '2' },
+    { college_key: '软件', grade_key: '', class_key: '13' }
   ]);
-  assert.deepEqual((await db.prepare('SELECT student_id FROM course_student_memberships WHERE course_id=? ORDER BY student_id').all(normalizedCourse.id)).map(row => row.student_id).sort((a, b) => a - b), [normalizedStudent.user.id, normalizedComputerStudent.user.id].sort((a, b) => a - b));
+  assert.deepEqual((await db.prepare('SELECT student_id FROM course_student_memberships WHERE course_id=? ORDER BY student_id').all(normalizedCourse.id)).map(row => row.student_id).sort((a, b) => a - b), [normalizedStudent.user.id, normalizedComputerStudent.user.id, compactStudent.user.id].sort((a, b) => a - b));
   const studentRegistration = await call(student, '/register', 'POST', { student_id: '88000003', name: 'New student', phone: '13812340004', college: 'Engineering', class: '1班', password: 'secure-test-password' }, 201);
   assert.equal(studentRegistration.user.role, 'student');
   await call(studentRegistration.user.id, '/teacher/dashboard', 'GET', undefined, 403);
