@@ -19,6 +19,7 @@
         </el-form-item>
         <el-form-item label="DeepSeek API Key">
           <el-input v-model="apiKey" type="password" show-password placeholder="sk-..." autocomplete="off" />
+          <p v-if="hasSavedKey" class="model-help">已绑定 API Key。只切换模型时无需重新输入；输入新 Key 才会替换原 Key。</p>
         </el-form-item>
       </el-form>
 
@@ -38,17 +39,19 @@ const router = useRouter()
 const apiKey = ref('')
 const saving = ref(false)
 const currentUser = JSON.parse(localStorage.getItem('user') || '{}')
+const hasSavedKey = ref(Boolean(currentUser.hasApiKey))
 const allowedModels = ['deepseek-flash', 'deepseek-v4-pro']
 const modelType = ref(currentUser.model_type === 'deepseek-v4-pro' ? 'deepseek-v4-pro' : 'deepseek-flash')
 
 async function save () {
-  if (!apiKey.value.trim()) return ElMessage.warning('请输入 DeepSeek API Key')
+  const newApiKey = apiKey.value.trim()
+  if (!newApiKey && !hasSavedKey.value) return ElMessage.warning('请输入 DeepSeek API Key')
   saving.value = true
   try {
     const response = await fetch('/api/user/apikey', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` },
-      body: JSON.stringify({ model_type: modelType.value, api_key: apiKey.value.trim() })
+      body: JSON.stringify({ model_type: modelType.value, ...(newApiKey ? { api_key: newApiKey } : {}) })
     })
     const data = await response.json()
     if (!response.ok) return ElMessage.error(data.error || '保存失败')
@@ -56,6 +59,7 @@ async function save () {
     user.hasApiKey = true
     user.model_type = modelType.value
     localStorage.setItem('user', JSON.stringify(user))
+    hasSavedKey.value = true
     ElMessage.success('模型配置已安全保存')
     router.push('/dashboard')
   } catch {

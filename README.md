@@ -171,6 +171,8 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
 不要把用户的 DeepSeek API Key 写入 `server/.env`。用户登录后在网页的“模型设置”中单独配置，目前提供 `deepseek-flash`（V4.1 Flash）和 `deepseek-v4-pro`；旧的 `deepseek-v4-flash` 仅作为兼容别名保留。
 
+模型选择与用户 API Key 相互独立。已绑定 Key 的用户切换模型时无需再次输入 Key；只有输入新的 Key 时才会替换原 Key，删除 Key 仍通过单独的删除操作完成。
+
 ### 4. 启动项目
 
 先按[数据库说明](deploy/postgres/README.md)启动本地 PostgreSQL；已有 SQLite 数据应先执行导入，再启动 API。Windows 可执行：
