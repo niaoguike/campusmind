@@ -32,7 +32,7 @@ docker compose --env-file deploy/postgres/.env --env-file deploy/redis/.env --en
 ## 验收
 
 1. 两个测试账户分别绑定自己的有效 DeepSeek Key，各发送一个问题。
-2. 通过 LiteLLM 管理接口或 PostgreSQL 检查，应出现 `campusmind-user-<id>` 的不同 key_alias，允许的模型只有 Flash/Pro；应用 PostgreSQL 中应有不同的加密网关凭证。不要把完整凭证打印到日志。
+2. 通过 LiteLLM 管理接口或 PostgreSQL 检查，应出现 `campusmind-user-<id>` 的不同 key_alias，允许的模型为 `deepseek-flash` 和 `deepseek-v4-pro`；旧的 `deepseek-v4-flash` 仅作为兼容别名。应用 PostgreSQL 中应有不同的加密网关凭证。不要把完整凭证打印到日志。
 3. 检查网关用量记录中两把虚拟 Key 分别累积 Token；供应商账单应分别落在这两个用户的 DeepSeek 账户。
 4. 提问需要查询课表/资料的问题，确认 Function Calling 的工具请求、工具结果回传和最终回答均正常。再验证出题、批改、复盘、个人/群聊成果生成及同伴协作。
 5. 第二个测试账户使用无效 DeepSeek Key 时应失败，不得成功消耗第一个账户的余额。临时降低新虚拟 Key 的 RPM/TPM，验证限流；一次多步 Agent 运行可能包含多次模型请求。

@@ -169,7 +169,7 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 | `REDIS_URL`、`REDIS_ENABLED` | 聊天缓存；开发时可自动读取 `deploy/redis/.env`，设为 `false` 可关闭 | 可选 |
 | `MEMORY_ENABLED`、`MEMORY_EMBEDDING_*` | 开启画像和历史摘要的语义记忆 | 可选，启用时需完整配置 |
 
-不要把用户的 DeepSeek API Key 写入 `server/.env`。用户登录后在网页的“模型设置”中单独配置，目前支持 `deepseek-v4-flash` 和 `deepseek-v4-pro`。
+不要把用户的 DeepSeek API Key 写入 `server/.env`。用户登录后在网页的“模型设置”中单独配置，目前提供 `deepseek-flash`（V4.1 Flash）和 `deepseek-v4-pro`；旧的 `deepseek-v4-flash` 仅作为兼容别名保留。
 
 ### 4. 启动项目
 

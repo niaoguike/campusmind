@@ -1,6 +1,7 @@
 import { ChatOpenAI } from '@langchain/openai';
 
-export const SUPPORTED_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro'];
+// Current DeepSeek API names plus the retired Flash alias kept for existing users.
+export const SUPPORTED_MODELS = ['deepseek-flash', 'deepseek-v4-pro', 'deepseek-v4-flash'];
 
 function positiveInteger(value, fallback, name) {
   const number = Number(value || fallback);

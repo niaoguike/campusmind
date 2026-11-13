@@ -1,7 +1,7 @@
 model_list:
-  - model_name: deepseek-v4-flash
+  - model_name: deepseek-flash
     litellm_params:
-      model: openai/deepseek-v4-flash
+      model: openai/deepseek-flash
       api_base: https://api.deepseek.com
       # A real provider credential is supplied per request by the backend.
       # Never configure a shared paid key as a fallback for user-owned billing.
@@ -9,6 +9,12 @@ model_list:
   - model_name: deepseek-v4-pro
     litellm_params:
       model: openai/deepseek-v4-pro
+      api_base: https://api.deepseek.com
+      api_key: campusmind-byok-required
+  # Compatibility alias for users who have not run the model refresh migration.
+  - model_name: deepseek-v4-flash
+    litellm_params:
+      model: openai/deepseek-flash
       api_base: https://api.deepseek.com
       api_key: campusmind-byok-required
 

@@ -22,9 +22,9 @@ function decryptSecret(value) {
   cipher.setAuthTag(tag);
   return Buffer.concat([cipher.update(data), cipher.final()]).toString('utf8');
 }
-const alice = { id: 1, api_key: encryptSecret('fake-provider-alice'), model_type: 'deepseek-v4-flash' };
+const alice = { id: 1, api_key: encryptSecret('fake-provider-alice'), model_type: 'deepseek-flash' };
 const bob = { id: 2, api_key: encryptSecret('fake-provider-bob'), model_type: 'deepseek-v4-pro' };
-const payload = { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'hello' }] };
+const payload = { model: 'deepseek-flash', messages: [{ role: 'user', content: 'hello' }] };
 
 test('per-user gateway credentials, real LangChain tool loop, artifacts and direct mode', async () => {
   const calls = [],generated = [],keys = new Map();
@@ -74,7 +74,7 @@ test('per-user gateway credentials, real LangChain tool loop, artifacts and dire
     const llm = service();
     await Promise.all([llm.sendChat(alice, payload), llm.sendChat(bob, { ...payload, model: bob.model_type }), llm.sendChat(alice, payload)]);
     assert.equal(generated.length, 2, 'concurrent calls must share credential creation');
-    assert.deepEqual(generated[0].models, ['deepseek-v4-flash', 'deepseek-v4-pro']);
+    assert.deepEqual(generated[0].models, ['deepseek-flash', 'deepseek-v4-pro', 'deepseek-v4-flash']);
     assert.equal(generated[0].rpm_limit, 60);
     assert.equal(generated[0].tpm_limit, 100000);
     for (const row of await db.prepare('SELECT * FROM llm_gateway_keys').all()) {

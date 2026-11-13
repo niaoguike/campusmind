@@ -12,7 +12,7 @@
         </el-form-item>
         <el-form-item label="选择模型">
           <el-radio-group v-model="modelType" class="model-options">
-            <el-radio-button value="deepseek-v4-flash">Flash · 更快、更省</el-radio-button>
+            <el-radio-button value="deepseek-flash">Flash · V4.1 更快、更省</el-radio-button>
             <el-radio-button value="deepseek-v4-pro">Pro · 更强推理</el-radio-button>
           </el-radio-group>
           <p class="model-help">日常问答、计划与资料检索建议选择 Flash；复杂推理或较难题目可选择 Pro。</p>
@@ -38,8 +38,8 @@ const router = useRouter()
 const apiKey = ref('')
 const saving = ref(false)
 const currentUser = JSON.parse(localStorage.getItem('user') || '{}')
-const allowedModels = ['deepseek-v4-flash', 'deepseek-v4-pro']
-const modelType = ref(allowedModels.includes(currentUser.model_type) ? currentUser.model_type : 'deepseek-v4-flash')
+const allowedModels = ['deepseek-flash', 'deepseek-v4-pro']
+const modelType = ref(currentUser.model_type === 'deepseek-v4-pro' ? 'deepseek-v4-pro' : 'deepseek-flash')
 
 async function save () {
   if (!apiKey.value.trim()) return ElMessage.warning('请输入 DeepSeek API Key')
