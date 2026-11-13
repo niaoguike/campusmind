@@ -24,6 +24,7 @@ import { createCourseResourceSearchTool } from './agents/retrievalAgent.js';
 import { createLearningStateTools } from './agents/learningStateAgent.js';
 import { createPlanDraftTool } from './agents/plannerAgent.js';
 import { createLearningOrchestrator } from './agents/orchestrator.js';
+import { createDirectChatRun, directChatEligible } from './agents/chatRouting.js';
 import { createPersonalRunTrace } from './agents/personalRunTrace.js';
 import { buildThreadHistory, loadRecentThreadMessages } from './agents/contextBuilder.js';
 import { buildLearningReviewInput, getLearningState, recordLearningEvent, updateMasteryFromQuiz } from './agents/learningAnalytics.js';
@@ -2435,24 +2436,25 @@ app.post('/api/agent/chat', auth, async (req, res) => {
   })();
   await conversationCache.recordMessage(user.id, threadId, userMessage);
 
-  const actionIntent = mode === 'action' ? await analyzeActionIntent(user, content) : { intent: 'none', confidence: 0 };
-  const proposedActions = mode === 'action' ? await proposePlatformActions(user, content, actionIntent) : [];
-  const platformActions = mode === 'action' ? await createPlatformActionRequests(user.id, threadId, proposedActions) : [];
   const recentMessages = await loadRecentThreadMessages({ db, cache: conversationCache, threadId, userId: user.id });
-  const history = await buildThreadHistory({ db, messages: recentMessages, threadId, userId: user.id, attachmentContext });
-  await longTermMemory.flushUserThreads(user.id, threadId);
-  const recalledMemory = await longTermMemory.recall(user.id, content || '用户正在学习附件中的课程内容', { threadId, historyStartId: recentMessages[0]?.id || 0 });
+  const directChat = directChatEligible({ content, mode, attachments, priorMessages: recentMessages.filter(message => Number(message.id) !== Number(userMessage.id)), exportMode });
+  const actionIntent = !directChat && mode === 'action' ? await analyzeActionIntent(user, content) : { intent: 'none', confidence: 0 };
+  const proposedActions = mode === 'action' && !directChat ? await proposePlatformActions(user, content, actionIntent) : [];
+  const platformActions = proposedActions.length ? await createPlatformActionRequests(user.id, threadId, proposedActions) : [];
+  const history = directChat ? [{ role: 'user', content }] : await buildThreadHistory({ db, messages: recentMessages, threadId, userId: user.id, attachmentContext });
+  if (!directChat) await longTermMemory.flushUserThreads(user.id, threadId);
+  const recalledMemory = directChat ? { status: 'skipped', brief: '', items: [], episodes: [] } : await longTermMemory.recall(user.id, content || '用户正在学习附件中的课程内容', { threadId, historyStartId: recentMessages[0]?.id || 0 });
   if (recalledMemory.brief) history.unshift({ role: 'system', content: recalledMemory.brief });
-  const memoryBrief = await accessibleMemoryBrief(user.id, content);
+  const memoryBrief = directChat ? '' : await accessibleMemoryBrief(user.id, content);
   if (memoryBrief) history.unshift({ role: 'system', content: memoryBrief });
-  const supervisorActions = mode === 'action' ? [...platformActions, ...(await supervisorActionsFor(user, content, actionIntent))] : [];
+  const supervisorActions = mode === 'action' && !directChat ? [...platformActions, ...(await supervisorActionsFor(user, content, actionIntent))] : [];
   if (mode === 'action' && supervisorActions.length) history.unshift({ role: 'system', content: `系统已为本次请求准备以下行动入口：${supervisorActions.map((action) => action.label).join('；')}。只有这些真实入口存在时，才能提及“点击确认”或“确认按钮”；请说明它们仍需用户点击确认，不要称自己没有平台操作能力。` });
-  history.unshift({ role: 'system', content: mode === 'action' ?
+  if (!directChat) history.unshift({ role: 'system', content: mode === 'action' ?
     '当前处于“行动工作台”。你是用户的 CampusMind 总行动 Agent，可拆解复杂目标并协调学习计划、本人资料库、校园论坛、学习群和获授权的其他 Agent。只能使用系统生成的结构化操作入口，不得声称已经执行尚未确认的动作；发送消息、移动资料、公开发帖或联系其他用户 Agent 必须等用户点击确认。若系统没有提供真实行动入口，不得编造或要求用户点击“确认发送 / 确认发布 / 确认委托”按钮，应明确说本次没有可点击操作卡并请用户补充目标。保持高校学习助手身份，只能基于用户明确给出的信息起草内容；不得编造他人隐私，也不得起草侮辱、骚扰或攻击性消息。你没有服务器 Shell、任意数据库写入或部署权限。' :
     '当前处于“学习问答”。只提供课程解释、课程资料检索、练习辅导、学习建议、复盘和学习成果生成。不得创建或建议执行群发消息、论坛发布、资料移动、跨用户 Agent 委托或其他平台写操作；如果用户要求执行平台动作，请说明需要切换到“行动工作台”。' });
   let trace = null;
   try {
-    const orchestration = await createPersonalLearningRun(user, content, history);
+    const orchestration = directChat ? createDirectChatRun({ model: llm.createModel(user, 0.3) }) : await createPersonalLearningRun(user, content, history);
     trace = await createPersonalRunTrace({ db, now, eventLog, user, threadId, content, orchestration });
     const result = await orchestration.invoke({ messages: history, onStep: trace.onStep });
     let answer = result.answer;

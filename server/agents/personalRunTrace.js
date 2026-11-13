@@ -13,7 +13,7 @@ export async function createPersonalRunTrace ({ db, now, eventLog, user, threadI
       await db.prepare('INSERT INTO agent_run_steps (run_id,step_index,agent_type,status,input_summary,output_summary,started_at,completed_at) VALUES (?,?,?,?,?,?,?,?)').run(
         id, index + 1, step.agent, index ? 'pending' : 'done',
         JSON.stringify({ task: step.task, dependsOn: step.dependsOn }),
-        index ? '' : `已通过${plan.source === 'model' ? '模型规划' : '规则回退'}拆分 ${plan.steps.length} 个专业任务，按依赖执行。`,
+        index ? '' : plan.source === 'direct' ? '独立通用问题，直接回答。' : `已通过${plan.source === 'model' ? '模型规划' : '规则回退'}拆分 ${plan.steps.length} 个专业任务，按依赖执行。`,
         index ? '' : now(), index ? '' : now())
     }
     await eventLog({ actorUserId: user.id, runId: id, eventType: 'personal_agent_run_started', scope: { thread_id: threadId, intent: plan.intent }, payload: { plan }, status: 'done' })
