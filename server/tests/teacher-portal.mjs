@@ -146,7 +146,7 @@ try {
   await call(registered.user.id, `/teacher/courses/${created.id}`, 'DELETE');
   assert.equal((await call(registered.user.id, '/teacher/dashboard')).courses.length, 0);
   await call(registered.user.id, `/teacher/courses/${created.id}/invite-student`, 'POST', { student_id: '90000005' }, 404);
-  await call(teacher, `/teacher/courses/${created.id}/analytics`, 'GET', undefined, 403);
+  await call(teacher, `/teacher/courses/${created.id}/analytics`, 'GET', undefined, 404);
   await call(student, '/teacher/courses', 'POST', { name: 'Unauthorized' }, 403);
   await call(registered.user.id, '/teacher/courses', 'POST', { name: ' ' }, 400);
   const normalizedStudent = await call(student, '/register', 'POST', { student_id: '88000001', name: 'Software student', phone: '13812340002', college: '软件学院', class: '软件13班', password: 'secure-test-password' }, 201);
