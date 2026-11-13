@@ -2628,6 +2628,23 @@ async function courseAnalytics(courseId) {
 app.get('/api/teacher/courses/:courseId/analytics', auth, requireCourseTeacher, async (req, res) => res.json(await courseAnalytics(req.courseId)));
 app.get('/api/teacher/courses', auth, async (req, res) => {if (!(await isTeacher(req.user.id))) return res.status(403).json({ error: '请求无效或无权访问，请检查课程权限与输入' });res.json(await db.prepare("SELECT c.* FROM courses c JOIN course_teacher_assignments a ON a.course_id=c.id WHERE a.user_id=? AND COALESCE(c.archived_at,'')=''").all(req.user.id));});
 app.get('/api/teacher/courses/:courseId/join-requests', auth, requireCourseTeacher, async (req, res) => res.json(await db.prepare(`SELECT r.*,u.name,u.student_id,u.college,u.class,u.avatar FROM course_join_requests r JOIN users u ON u.id=r.student_id WHERE r.course_id=? ORDER BY CASE r.status WHEN 'pending' THEN 0 ELSE 1 END,r.id DESC`).all(req.courseId)));
+app.post('/api/teacher/courses/:courseId/invite-student', auth, requireCourseTeacher, async (req, res) => {
+  const account = String(req.body?.student_id || '').trim();
+  if (!account || account.length > 64) return res.status(400).json({ error: '请输入有效学号' });
+  const student = await db.prepare("SELECT id,name,student_id FROM users WHERE student_id=? AND role='student' AND COALESCE(account_status,'active')='active'").get(account);
+  if (!student) return res.status(404).json({ error: '未找到可加入的学生账号，请核对学号' });
+  const space = await courseSpaceOf(req.courseId);
+  if (!space) return res.status(404).json({ error: '课程空间不存在' });
+  const alreadyJoined = !!(await db.prepare('SELECT 1 FROM course_student_memberships WHERE course_id=? AND student_id=?').get(req.courseId, student.id));
+  await db.transaction(async () => {
+    await db.prepare('INSERT INTO course_student_memberships (course_id,student_id) VALUES (?,?) ON CONFLICT DO NOTHING').run(req.courseId, student.id);
+    await db.prepare('INSERT INTO conversation_members (conversation_id,user_id) VALUES (?,?) ON CONFLICT DO NOTHING').run(space.conversation_id, student.id);
+    if (!alreadyJoined) await db.prepare(`INSERT INTO course_join_requests (course_id,student_id,status,requested_at,reviewed_at,reviewed_by,review_note)
+      VALUES (?,?,'approved',?,?,?,'教师按学号邀请')
+      ON CONFLICT(course_id,student_id) DO UPDATE SET status='approved',reviewed_at=excluded.reviewed_at,reviewed_by=excluded.reviewed_by,review_note=excluded.review_note`).run(req.courseId, student.id, now(), now(), req.user.id);
+  })();
+  res.status(alreadyJoined ? 200 : 201).json({ student: { id: student.id, name: student.name, student_id: student.student_id }, already_joined: alreadyJoined, message: alreadyJoined ? '该学生已在课程中' : `已邀请 ${student.name} 加入课程` });
+});
 app.patch('/api/teacher/course-join-requests/:requestId', auth, async (req, res) => {
   const request = await db.prepare('SELECT * FROM course_join_requests WHERE id=?').get(req.params.requestId);if (!request || !(await managesCourse(req.user.id, request.course_id))) return res.status(404).json({ error: '加入申请不存在或无权处理' });
   const action = String(req.body.action || '');if (!['approve','reject'].includes(action)) return res.status(400).json({ error: '审核操作无效' });
