@@ -3,11 +3,15 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import jwt from 'jsonwebtoken'
 import { createTestDatabase } from './helpers/postgres.mjs'
-import { classifyFeedbackCandidate } from '../services/groupFeedback.js'
+import { classifyFeedbackCandidate, normalizeFeedbackResult } from '../services/groupFeedback.js'
 
 assert.equal(classifyFeedbackCandidate('普通聊天'), null)
 assert.equal(classifyFeedbackCandidate('@AI 这一步为什么不对？')?.type, 'help_request')
 assert.equal(classifyFeedbackCandidate('为什么这里不会算？', 'suggest')?.type, 'help_request')
+const normalized = normalizeFeedbackResult(JSON.stringify({ summary:'核验', claims:[{ claim:'结论', source_message_ids:[1,999], evidence:[{ resource_id:4,chunk_id:7 },{ resource_id:999,chunk_id:999 }], status:'supported' }] }),[{ id:1 }],[{ resource_id:4,chunk_id:7 }])
+assert.deepEqual(normalized.claims[0].source_message_ids,[1])
+assert.equal(normalized.claims[0].evidence.length,1)
+assert.equal(normalizeFeedbackResult('{bad',[],[]).claims.length,0)
 
 const fixture = await createTestDatabase()
 const port = 19379, secret = 'isolated-group-feedback-test'
