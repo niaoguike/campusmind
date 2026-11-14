@@ -32,6 +32,7 @@ import { buildQuizGenerationPrompt } from './agents/questionGeneratorAgent.js';
 import { buildShortAnswerGradingPrompt } from './agents/assessmentAgent.js';
 import { createReflectionAgent } from './agents/reflectionAgent.js';
 import { createGroupFacilitatorAgent, normalizeGroupProposal } from './agents/groupCollaborationAgent.js';
+import { registerGroupFeedbackRoutes } from './services/groupFeedback.js';
 import { AGENT_META, traceLabel } from './agents/runTrace.js';
 import SmsClient, { SendSmsRequest } from '@alicloud/dysmsapi20170525';
 import OpenApi from '@alicloud/openapi-core';
@@ -81,6 +82,7 @@ async function backfillIdentityNormalization(db) {
   })();
 }
 const db = await createDatabase();await migrateDatabase(db);await backfillIdentityNormalization(db);
+await db.prepare("UPDATE group_feedback SET status='failed',error_code='PROCESS_RESTART' WHERE status IN ('queued','running')").run();
 const conversationCache = createConversationCache({ env: await conversationCacheConfig() });
 await conversationCache.start();
 
@@ -428,6 +430,7 @@ const friends = async (left, right) => !!(await db.prepare('SELECT 1 FROM friend
 const courseOf = async (courseId) => await db.prepare("SELECT c.*,a.user_id AS teacher_id,u.name AS teacher_name FROM courses c LEFT JOIN course_teacher_assignments a ON a.course_id=c.id LEFT JOIN users u ON u.id=a.user_id WHERE c.id=? AND COALESCE(c.archived_at,'')='' ORDER BY a.user_id LIMIT 1").get(courseId);
 const courseSpaceOf = async (courseId) => await db.prepare("SELECT s.*,c.name,c.teacher,c.college,c.class_name,c.teacher AS course_teacher FROM course_spaces s JOIN courses c ON c.id=s.course_id WHERE s.course_id=? AND COALESCE(c.archived_at,'')=''").get(courseId);
 const courseIdForConversation = async (conversationId) => (await db.prepare('SELECT course_id FROM course_spaces WHERE conversation_id=?').get(conversationId))?.course_id || null;
+let groupFeedback;
 async function isCourseMember(courseId, userId) {
   return !!(await managesCourse(userId, courseId) || await db.prepare('SELECT 1 FROM course_student_memberships WHERE course_id=? AND student_id=?').get(courseId, userId));
 }
@@ -797,6 +800,7 @@ getResourceRag(db).start();
 setTimeout(() => {queueUnprocessedResources().catch((error) => console.error('历史资料索引任务异常：', error.message));}, 1500);
 
 const app = createAsyncApp();app.use(cors());app.use(express.json({ limit: '1mb' }));app.use('/uploads/resources', express.static(resourceUploadDir));app.use('/api/avatars', express.static(avatarUploadDir, { maxAge: '1d' }));
+groupFeedback = registerGroupFeedbackRoutes({ app, auth, db, llm, userOf, conversationOf, member, ownerOf, courseIdForConversation });
 // Kept before the older member route below so group owners can safely leave too:
 // they explicitly choose a successor, while a one-person group must be dissolved.
 app.delete('/api/conversations/:id/members/me', auth, async (req, res) => {
@@ -1005,7 +1009,39 @@ app.post('/api/conversations/:id/agent-requests', auth, async (req, res) => {con
 app.patch('/api/conversations/:id/agent-requests/:requestId', auth, async (req, res) => {const conversation = await conversationOf(req.params.id),action = req.body.action;if (await courseIdForConversation(req.params.id)) return res.status(403).json({ error: '课程空间不允许审批学生 Agent 入群' });if (!conversation || !(await ownerOf(conversation.id, req.user.id))) return res.status(403).json({ error: '只有群主可以审批' });const request = await db.prepare("SELECT * FROM agent_group_requests WHERE id=? AND conversation_id=? AND status='pending'").get(req.params.requestId, conversation.id);if (!request) return res.status(404).json({ error: '申请不存在或已处理' });if (action === 'approve') await db.prepare("INSERT INTO group_agents (conversation_id,user_id) VALUES (?,?) ON CONFLICT DO NOTHING").run(conversation.id, request.agent_owner_id);await db.prepare("UPDATE agent_group_requests SET status=? WHERE id=?").run(action === 'approve' ? 'approved' : 'rejected', request.id);res.json({ message: action === 'approve' ? '已同意 Agent 入群' : '已拒绝申请' });});
 app.patch('/api/conversations/:id/my-agent', auth, async (req, res) => {const conversation = await conversationOf(req.params.id),enabled = !!req.body.auto_reply;if (await courseIdForConversation(req.params.id) && (await userOf(req.user.id)).role !== 'teacher') return res.status(403).json({ error: '课程空间只允许教师 Agent 参与' });if (!conversation || conversation.type !== 'group' || !(await member(conversation.id, req.user.id))) return res.status(403).json({ error: '无权设置该群' });if (!(await db.prepare('SELECT 1 FROM group_agents WHERE conversation_id=? AND user_id=?').get(conversation.id, req.user.id))) return res.status(400).json({ error: '请先申请并等待群主同意你的 Agent 入群' });if (enabled && !(await userOf(req.user.id))?.api_key) return res.status(400).json({ error: '请先在模型设置中绑定 API Key，才能开启实时参与' });await db.prepare('UPDATE group_agents SET auto_reply=? WHERE conversation_id=? AND user_id=?').run(enabled ? 1 : 0, conversation.id, req.user.id);res.json({ message: enabled ? '已开启实时参与：群内新消息会发送给你的 Agent，并由它在需要时回复' : '已关闭实时参与；你的 Agent 仍可在被 @ 时回答' });});
 app.delete('/api/conversations/:id/group-agents/:ownerId', auth, async (req, res) => {const conversation = await conversationOf(req.params.id),agentOwnerId = Number(req.params.ownerId);if (!conversation || conversation.type !== 'group' || !(await ownerOf(conversation.id, req.user.id)) && req.user.id !== agentOwnerId) return res.status(403).json({ error: '只有群主或 Agent 主人可以移除该 Agent' });const result = await db.prepare('DELETE FROM group_agents WHERE conversation_id=? AND user_id=?').run(conversation.id, agentOwnerId);if (!result.changes) return res.status(404).json({ error: '该 Agent 不在群内' });await eventLog({ actorUserId: req.user.id, targetUserId: agentOwnerId, eventType: 'group_agent_removed', scope: { conversation_id: conversation.id }, status: 'done' });res.json({ message: '已将 Agent 移出本学习群' });});
-app.get('/api/conversations/:id/messages', auth, async (req, res) => {const conversation = await conversationOf(req.params.id);if (!conversation || !(await member(conversation.id, req.user.id))) return res.status(403).json({ error: '无权查看此会话' });const messages = (await db.prepare("SELECT m.*,u.name owner_name,u.avatar owner_avatar,u.agent_name,u.agent_avatar,CASE WHEN m.sender_type='agent' THEN u.agent_name ELSE u.name END sender_name,CASE WHEN m.sender_type='agent' THEN u.agent_avatar ELSE u.avatar END sender_avatar,CASE WHEN m.sender_type='agent' THEN m.agent_owner_id ELSE m.sender_id END profile_user_id FROM messages m JOIN users u ON u.id=CASE WHEN m.sender_type='agent' THEN m.agent_owner_id ELSE m.sender_id END WHERE m.conversation_id=? ORDER BY m.id").all(conversation.id)).map((item) => ({ ...item, attachments: safeJson(item.attachments_json, []) }));const lastId = messages.at(-1)?.id || 0;await db.prepare("INSERT INTO conversation_reads (conversation_id,user_id,last_read_message_id,updated_at) VALUES (?,?,?,?) ON CONFLICT(conversation_id,user_id) DO UPDATE SET last_read_message_id=excluded.last_read_message_id,updated_at=excluded.updated_at").run(conversation.id, req.user.id, lastId, now());res.json(messages);});
+app.get('/api/conversations/:id/messages', auth, async (req, res) => {
+  const conversation = await conversationOf(req.params.id);
+  if (!conversation || !(await member(conversation.id, req.user.id))) return res.status(403).json({ error: '无权查看此会话' });
+  const before = req.query.before == null ? null : Number(req.query.before), limit = req.query.limit == null ? 50 : Number(req.query.limit);
+  if ((before !== null && (!Number.isSafeInteger(before) || before < 1)) || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) return res.status(400).json({ error: '分页参数无效' });
+  const messages = (await db.prepare(`SELECT m.*,u.name owner_name,u.avatar owner_avatar,u.agent_name,u.agent_avatar,
+    CASE WHEN m.sender_type='agent' THEN u.agent_name ELSE u.name END sender_name,
+    CASE WHEN m.sender_type='agent' THEN u.agent_avatar ELSE u.avatar END sender_avatar,
+    CASE WHEN m.sender_type='agent' THEN m.agent_owner_id ELSE m.sender_id END profile_user_id
+    FROM messages m JOIN users u ON u.id=CASE WHEN m.sender_type='agent' THEN m.agent_owner_id ELSE m.sender_id END
+    WHERE m.conversation_id=? AND (?::bigint IS NULL OR m.id<?) ORDER BY m.id DESC LIMIT ?`).all(conversation.id,before,before,limit)).reverse().map(item => ({ ...item, content: item.deleted_at ? '此消息已删除' : item.content, attachments: item.deleted_at ? [] : safeJson(item.attachments_json, []) }));
+  if (before === null) {
+    const latest = await db.prepare('SELECT COALESCE(MAX(id),0) id FROM messages WHERE conversation_id=?').get(conversation.id);
+    await db.prepare("INSERT INTO conversation_reads (conversation_id,user_id,last_read_message_id,updated_at) VALUES (?,?,?,?) ON CONFLICT(conversation_id,user_id) DO UPDATE SET last_read_message_id=excluded.last_read_message_id,updated_at=excluded.updated_at").run(conversation.id, req.user.id, latest.id, now());
+  }
+  res.json(messages);
+});
+app.patch('/api/conversations/:id/messages/:messageId', auth, async (req,res) => {
+  const conversation = await conversationOf(req.params.id);
+  if (!conversation || !(await member(conversation.id,req.user.id))) return res.status(403).json({ error:'无权编辑' });
+  const content = String(req.body.content || '').trim();
+  if (!content || content.length > 2000) return res.status(400).json({ error:'消息需为 1 至 2000 字' });
+  const result = await db.prepare("UPDATE messages SET content=?,edited_at=?,version=version+1 WHERE id=? AND conversation_id=? AND sender_id=? AND sender_type='user' AND deleted_at IS NULL").run(content,now(),req.params.messageId,conversation.id,req.user.id);
+  if (!result.changes) return res.status(404).json({ error:'只能编辑自己的未删除消息' });
+  res.json({ message:'已修改，相关 AI 反馈将标记为可能过期' });
+});
+app.delete('/api/conversations/:id/messages/:messageId', auth, async (req,res) => {
+  const conversation = await conversationOf(req.params.id);
+  if (!conversation || !(await member(conversation.id,req.user.id))) return res.status(403).json({ error:'无权删除' });
+  const result = await db.prepare("UPDATE messages SET content='',deleted_at=?,version=version+1 WHERE id=? AND conversation_id=? AND sender_type='user' AND deleted_at IS NULL AND (sender_id=? OR ?=1)").run(now(),req.params.messageId,conversation.id,req.user.id,conversation.owner_id === req.user.id ? 1 : 0);
+  if (!result.changes) return res.status(404).json({ error:'消息不存在或无权删除' });
+  res.json({ message:'消息已删除' });
+});
 app.get('/api/conversations/:id/attachments/:attachmentId/download', auth, async (req, res) => {
   const conversation = await conversationOf(req.params.id),attachment = await db.prepare('SELECT * FROM group_attachments WHERE id=? AND conversation_id=?').get(req.params.attachmentId, req.params.id);
   if (!conversation || !attachment || !(await member(conversation.id, req.user.id))) return res.status(404).json({ error: '群学习成果不存在或无权下载' });
@@ -1015,8 +1051,12 @@ app.post('/api/conversations/:id/messages', auth, async (req, res) => {
   const conversation = await conversationOf(req.params.id),content = String(req.body.content || '').trim().slice(0, 2000);
   if (!conversation || !(await member(conversation.id, req.user.id))) return res.status(403).json({ error: '无权发送此会话' });
   if (!content) return res.status(400).json({ error: '消息不能为空' });
-  const result = await db.prepare("INSERT INTO messages (conversation_id,sender_id,sender_type,content) VALUES (?,?,'user',?)").run(conversation.id, req.user.id, content);
+  const replyToId = req.body.reply_to_id == null ? null : Number(req.body.reply_to_id);
+  if (replyToId !== null && (!Number.isSafeInteger(replyToId) || !(await db.prepare('SELECT 1 FROM messages WHERE id=? AND conversation_id=? AND deleted_at IS NULL').get(replyToId,conversation.id)))) return res.status(400).json({ error: '回复目标不属于本会话' });
+  const contextAllowed = conversation.type === 'group' && !!(await db.prepare('SELECT 1 FROM group_feedback_consents WHERE conversation_id=? AND user_id=? AND allow_context=true').get(conversation.id,req.user.id));
+  const result = await db.prepare("INSERT INTO messages (conversation_id,sender_id,sender_type,content,reply_to_id,ai_context_allowed) VALUES (?,?,'user',?,?,?)").run(conversation.id, req.user.id, content,replyToId,contextAllowed);
   res.status(201).json({ id: result.insertId, created_at: now() });
+  if (conversation.type === 'group' && contextAllowed) groupFeedback.observe(conversation, { id: result.insertId, sender_id: req.user.id, content }).catch(() => {});
   const session = conversation.type === 'group' ? await activeGroupSession(conversation.id) : null;
   if (session && groupSessionStopCommand(content)) {
     await db.prepare("UPDATE group_agent_sessions SET status='stopping',stop_reason=?,updated_at=? WHERE id=?").run('用户在群聊中停止协作', now(), session.id);
@@ -1024,7 +1064,7 @@ app.post('/api/conversations/:id/messages', auth, async (req, res) => {
     return;
   }
   if (session) return;
-  if (conversation.type === 'group' && isLearningDiscussion(content)) setTimeout(async () => {
+  if (conversation.type === 'group' && isLearningDiscussion(content) && !(await db.prepare('SELECT 1 FROM group_feedback_settings WHERE conversation_id=? AND observer_enabled=true').get(conversation.id))) setTimeout(async () => {
     const explicitMentions = await db.prepare('SELECT u.agent_name FROM group_agents ga JOIN users u ON u.id=ga.user_id WHERE ga.conversation_id=?').all(conversation.id);
     if (explicitMentions.some((agent) => agent.agent_name && content.includes(`@${agent.agent_name}`))) return;
     const enabled = await db.prepare('SELECT ga.user_id,u.agent_name FROM group_agents ga JOIN users u ON u.id=ga.user_id WHERE ga.conversation_id=? AND ga.auto_reply=1 AND u.api_key!=\'\' ORDER BY ga.created_at LIMIT 2').all(conversation.id);
