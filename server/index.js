@@ -91,6 +91,7 @@ const execFileAsync = promisify(execFile);
 // starts on Monday, 2026-03-09. Future semesters can be added here.
 const SEMESTER_STARTS = { '2025-2026-2': '2026-03-09' };
 const scheduleImportCache = new Map();
+const RESOURCE_FILE_LIMIT_BYTES = 320 * 1024 * 1024;
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024, files: 1 },
@@ -101,7 +102,7 @@ const upload = multer({
 });
 const resourceUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024, files: 1 },
+  limits: { fileSize: RESOURCE_FILE_LIMIT_BYTES, files: 1 },
   fileFilter: (req, file, cb) => {
     const allowed = /\.(pdf|doc|docx|ppt|pptx|xls|xlsx|csv|txt|png|jpe?g)$/i.test(file.originalname || '');
     cb(allowed ? null : new Error('仅支持 PDF、Office、表格、文本或图片资料'), allowed);
@@ -2672,6 +2673,7 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', agent: 'langchain'
 app.use((error, req, res, next) => {
   console.error('API request failed:', /^[A-Z0-9_]+$/.test(error.code || '') ? error.code : 'REQUEST_FAILED');
   if (res.headersSent) return res.end();
+  if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: '单个文件不能超过 320MB' });
   res.status(500).json({ error: '请求处理失败，请稍后重试' });
 });
 const PORT = process.env.PORT || 3001;

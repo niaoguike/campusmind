@@ -66,7 +66,7 @@
         <el-form-item :label="uploadMode === 'folder' ? '资料文件夹' : '资料文件'">
           <input v-if="uploadMode === 'file'" ref="fileInput" class="file-input" type="file" accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.csv,.txt,.png,.jpg,.jpeg" @change="chooseFile">
           <input v-else ref="folderInput" class="file-input" type="file" webkitdirectory directory multiple @change="chooseFolder">
-          <small class="upload-note" v-if="uploadMode === 'file'">支持 PDF、DOCX、PPTX、Excel、CSV、TXT、PNG、JPG，单个文件不超过 20MB。文字版文件会自动建立 Agent 检索索引。</small>
+          <small class="upload-note" v-if="uploadMode === 'file'">支持 PDF、DOCX、PPTX、Excel、CSV、TXT、PNG、JPG，单个文件不超过 320MB。文字版文件会自动建立 Agent 检索索引。</small>
           <small class="upload-note" v-else>请选择一个章节资料文件夹。最多 60 个文件、单个不超过 20MB；子文件夹结构会保留在资料库中，文件夹内所有可解析资料都会加入 Agent 检索。</small>
           <p v-if="file && uploadMode === 'file'" class="selected-file">已选择：{{ file.name }}（{{ formatSize(file.size) }}）</p>
           <p v-if="folderFiles.length && uploadMode === 'folder'" class="selected-file">已选择文件夹：{{ folderName }}（{{ folderFiles.length }} 个文件，{{ formatSize(folderTotalSize) }}）</p>
@@ -140,7 +140,7 @@ function chooseFolder (event) {
 async function publish () {
   if (uploadMode.value === 'folder') return publishFolder()
   if (!file.value) return ElMessage.warning('请选择要上传的资料文件')
-  if (file.value.size > 20 * 1024 * 1024) return ElMessage.error('文件不能超过 20MB')
+  if (file.value.size > 320 * 1024 * 1024) return ElMessage.error('文件不能超过 320MB')
   if (!form.value.course_id) return ElMessage.warning('请选择所属课程')
   uploading.value = true
   const body = new FormData()
