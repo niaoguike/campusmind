@@ -1033,6 +1033,7 @@ app.patch('/api/conversations/:id/messages/:messageId', auth, async (req,res) =>
   if (!content || content.length > 2000) return res.status(400).json({ error:'消息需为 1 至 2000 字' });
   const result = await db.prepare("UPDATE messages SET content=?,edited_at=?,version=version+1 WHERE id=? AND conversation_id=? AND sender_id=? AND sender_type='user' AND deleted_at IS NULL").run(content,now(),req.params.messageId,conversation.id,req.user.id);
   if (!result.changes) return res.status(404).json({ error:'只能编辑自己的未删除消息' });
+  if (conversation.type === 'group') await groupFeedback.invalidateMessage(conversation.id, req.params.messageId);
   res.json({ message:'已修改，相关 AI 反馈将标记为可能过期' });
 });
 app.delete('/api/conversations/:id/messages/:messageId', auth, async (req,res) => {
@@ -1040,6 +1041,7 @@ app.delete('/api/conversations/:id/messages/:messageId', auth, async (req,res) =
   if (!conversation || !(await member(conversation.id,req.user.id))) return res.status(403).json({ error:'无权删除' });
   const result = await db.prepare("UPDATE messages SET content='',deleted_at=?,version=version+1 WHERE id=? AND conversation_id=? AND sender_type='user' AND deleted_at IS NULL AND (sender_id=? OR ?=1)").run(now(),req.params.messageId,conversation.id,req.user.id,conversation.owner_id === req.user.id ? 1 : 0);
   if (!result.changes) return res.status(404).json({ error:'消息不存在或无权删除' });
+  if (conversation.type === 'group') await groupFeedback.invalidateMessage(conversation.id, req.params.messageId);
   res.json({ message:'消息已删除' });
 });
 app.get('/api/conversations/:id/attachments/:attachmentId/download', auth, async (req, res) => {

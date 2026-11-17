@@ -3,11 +3,13 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import jwt from 'jsonwebtoken'
 import { createTestDatabase } from './helpers/postgres.mjs'
-import { classifyFeedbackCandidate, normalizeFeedbackResult } from '../services/groupFeedback.js'
+import { classifyFeedbackCandidate, normalizeFeedbackResult, observerEligible } from '../services/groupFeedback.js'
 
 assert.equal(classifyFeedbackCandidate('普通聊天'), null)
 assert.equal(classifyFeedbackCandidate('@AI 这一步为什么不对？')?.type, 'help_request')
 assert.equal(classifyFeedbackCandidate('为什么这里不会算？', 'suggest')?.type, 'help_request')
+assert.equal(observerEligible('你好'),false)
+assert.equal(observerEligible('向量检索一定比关键词检索快'),true)
 const normalized = normalizeFeedbackResult(JSON.stringify({ summary:'核验', claims:[{ claim:'结论', source_message_ids:[1,999], evidence:[{ resource_id:4,chunk_id:7 },{ resource_id:999,chunk_id:999 }], status:'supported' }] }),[{ id:1 }],[{ resource_id:4,chunk_id:7 }])
 assert.deepEqual(normalized.claims[0].source_message_ids,[1])
 assert.equal(normalized.claims[0].evidence.length,1)
@@ -42,6 +44,9 @@ try {
   await call(owner,`/conversations/${group}/feedback-settings`,'PATCH',{ observer_enabled:true,trigger_mode:'explicit',analysis_mode:'single' })
   await call(owner,`/conversations/${group}/feedback-consent`,'PATCH',{ allow_context:true })
   await call(member,`/conversations/${group}/feedback-consent`,'PATCH',{ allow_context:true })
+  assert.equal((await call(owner,`/conversations/${group}/feedback-settings`)).receive_hints,false)
+  await call(owner,`/conversations/${group}/feedback-consent`,'PATCH',{ receive_hints:true,hint_daily_limit:2 })
+  assert.equal((await call(owner,`/conversations/${group}/feedback-settings`)).hint_daily_limit,2)
   const first = await call(member,`/conversations/${group}/messages`,'POST',{ content:'第一条' },201)
   const second = await call(member,`/conversations/${group}/messages`,'POST',{ content:'第二条',reply_to_id:first.id },201)
   await call(outsider,`/conversations/${group}/messages?limit=1`,'GET',undefined,403)
@@ -51,6 +56,13 @@ try {
   assert.equal((await call(owner,`/conversations/${group}/messages?before=${second.id}&limit=1`))[0].id,first.id)
   await call(owner,`/conversations/${group}/messages/${second.id}`,'PATCH',{ content:'越权编辑' },404)
   await call(member,`/conversations/${group}/messages/${second.id}`,'PATCH',{ content:'已修改' })
+  const secondVersion = (await db.prepare('SELECT version FROM messages WHERE id=?').get(second.id)).version
+  const hint = Number((await db.prepare("INSERT INTO group_observer_hints (conversation_id,recipient_id,anchor_message_id,anchor_version,source_message_ids,kind,title,teaser,created_at,updated_at) VALUES (?,?,?,?,?,'possible_error','值得核对','需要核查原消息',?,?)").run(group,owner,second.id,secondVersion,JSON.stringify([second.id]),new Date().toISOString(),new Date().toISOString())).insertId)
+  assert.equal((await call(owner,`/conversations/${group}/observer-hints`)).length,1)
+  await call(member,`/conversations/${group}/observer-hints/${hint}/followups`,'GET',undefined,404)
+  await call(owner,`/conversations/${group}/observer-hints/${hint}`,'PATCH',{status:'read'})
+  await call(member,`/conversations/${group}/messages/${second.id}`,'PATCH',{content:'再次修改'})
+  assert.equal((await call(owner,`/conversations/${group}/observer-hints`)).length,0)
   const version = (await db.prepare('SELECT version FROM messages WHERE id=?').get(first.id)).version
   const feedback = Number((await db.prepare("INSERT INTO group_feedback (conversation_id,requester_id,anchor_message_id,anchor_version,trigger_type,mode,status,result_json,created_at,updated_at) VALUES (?,?,?,?,?,'single','completed',?,?,?)").run(group,member,first.id,version,'manual',JSON.stringify({ summary:'测试反馈' }),new Date().toISOString(),new Date().toISOString())).insertId)
   assert.equal((await call(member,`/conversations/${group}/feedback/${feedback}`)).result.summary,'测试反馈')
@@ -62,6 +74,7 @@ try {
   assert.equal((await call(member,`/conversations/${group}/feedback/${feedback}`)).stale,true)
   await call(member,`/conversations/${group}/feedback-consent`,'PATCH',{ allow_context:false })
   await call(owner,`/conversations/${group}/feedback/${feedback}`,'GET',undefined,404)
+  assert.equal((await call(owner,`/conversations/${group}/feedback-settings`)).my_consent,true)
   console.log(`PASS group feedback: ${checks} HTTP assertions plus trigger checks`)
 } finally {
   child.kill()
