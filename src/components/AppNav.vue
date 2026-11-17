@@ -3,6 +3,7 @@
     <router-link :to="user.role==='teacher'?'/teacher':'/dashboard'" class="brand"><span>◒</span> CampusMind</router-link>
     <nav>
       <router-link v-for="item in visibleLinks" :key="item.to" :to="item.to">{{ item.icon }} {{ item.label }}</router-link>
+      <router-link v-if="user.role==='teacher'" to="/course">▣ 课程资料</router-link>
     </nav>
     <div class="nav-user">
       <div class="notice-wrap">
