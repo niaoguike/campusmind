@@ -17,6 +17,15 @@ async function call(user, url, method = 'GET', body, status = 200) {
   const r = await fetch(`http://127.0.0.1:${port}/api${url}`, { method, headers: { Authorization: `Bearer ${jwt.sign({ id: user }, secret)}`, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
   const data = await r.json();assert.equal(r.status, status, `${method} ${url}: ${JSON.stringify(data)}`);checks++;return data;
 }
+async function uploadResource(user, courseId, status = 201) {
+  const body = new FormData();
+  body.append('course_id', String(courseId));
+  body.append('title', 'Teacher-created course material');
+  body.append('type', 'note');
+  body.append('file', new Blob(['teacher upload regression test'], { type: 'text/plain' }), 'teacher-upload.txt');
+  const r = await fetch(`http://127.0.0.1:${port}/api/resources/upload`, { method: 'POST', headers: { Authorization: `Bearer ${jwt.sign({ id: user }, secret)}` }, body });
+  const data = await r.json();assert.equal(r.status, status, `POST /resources/upload: ${JSON.stringify(data)}`);checks++;return data;
+}
 try {
   for (let i = 0; i < 600; i++) {if (output.includes('CampusMind server:')) break;if (child.exitCode !== null) throw new Error(output);await new Promise((r) => setTimeout(r, 100));}
   assert.match(output, /CampusMind server:/);
@@ -125,6 +134,9 @@ try {
   }
   const created = await call(registered.user.id, '/teacher/courses', 'POST', { name: 'New teaching class', college: 'Engineering', class_name: '1' }, 201);
   assert.equal((await call(registered.user.id, '/teacher/dashboard')).courses[0].id, created.id);
+  await call(registered.user.id, `/resources?course_id=${created.id}`);
+  const uploaded = await uploadResource(registered.user.id, created.id);
+  assert.equal((await db.prepare('SELECT course_id,uploader_id,file_name FROM resources WHERE id=?').get(uploaded.id)).uploader_id, registered.user.id);
   await call(registered.user.id, `/teacher/courses/${created.id}`, 'DELETE');
   assert.equal((await call(registered.user.id, '/teacher/dashboard')).courses.length, 0);
   await call(teacher, `/teacher/courses/${created.id}/analytics`, 'GET', undefined, 403);
