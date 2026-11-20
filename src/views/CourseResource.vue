@@ -8,7 +8,7 @@
           <h1>课程资料库</h1>
           <p>上传讲义、笔记、题单和课件。文件会自动解析为可供专属 Agent 检索的正文；发布者可删除自己的资料，管理员可管理全部资料。</p>
         </div>
-        <button v-if="me.role === 'teacher' || me.is_admin" class="primary" @click="dialog = true">＋ 上传资料</button>
+        <button v-if="(me.role === 'teacher' || me.is_admin) && !currentCourse?.archived_at" class="primary" @click="dialog = true">＋ 上传资料</button>
       </header>
 
       <section class="course-tabs">
@@ -43,7 +43,7 @@
             </small>
           </div>
           <div class="actions">
-            <a v-if="resource.file_path" :href="resource.file_path" target="_blank">打开文件 ↗</a>
+            <button v-if="resource.file_path" class="plain" @click="openResource(resource)">打开文件 ↗</button>
             <a v-else-if="resource.url" :href="resource.url" target="_blank">查看链接 ↗</a>
             <button v-if="canReprocess(resource)" class="plain" @click="reprocess(resource)">重新解析</button>
             <button v-if="isAdmin" class="plain" @click="togglePin(resource)">{{ resource.is_pinned ? '取消置顶' : '置顶' }}</button>
@@ -55,7 +55,7 @@
       </section>
     </main>
 
-    <el-dialog v-if="me.role === 'teacher' || me.is_admin" v-model="dialog" title="上传课程资料" width="520px" :close-on-click-modal="false">
+    <el-dialog v-if="(me.role === 'teacher' || me.is_admin) && !currentCourse?.archived_at" v-model="dialog" title="上传课程资料" width="520px" :close-on-click-modal="false">
       <el-form label-position="top">
         <el-form-item label="所属课程">
           <el-select v-model="form.course_id" style="width:100%"><el-option v-for="course in courses" :key="course.id" :label="course.name" :value="course.id" /></el-select>
@@ -93,7 +93,7 @@ import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
 import AppNav from '../components/AppNav.vue'
 import CourseTeaching from '../components/CourseTeaching.vue'
-import { api } from '../utils/api'
+import { api, openFile } from '../utils/api'
 
 const courses = ref([])
 const router = useRouter()
@@ -111,6 +111,7 @@ const uploading = ref(false)
 const form = ref({ course_id: null, title: '', type: 'note', description: '', tags: '' })
 const me = computed(() => JSON.parse(localStorage.getItem('user') || '{}'))
 const isAdmin = computed(() => Boolean(me.value.is_admin))
+const currentCourse = computed(() => courses.value.find((course) => course.id === selected.value))
 const folderTotalSize = computed(() => folderFiles.value.reduce((total, item) => total + item.size, 0))
 const groupedResources = computed(() => {
   const groups = new Map()
@@ -127,6 +128,9 @@ const canDelete = resource => Number(resource.uploader_id) === Number(me.value.i
 const canReprocess = resource => Boolean(resource.file_path) && canDelete(resource) && resource.ingestion_status !== 'processing'
 const indexLabel = resource => ({ ready: `AI 已可检索 · ${resource.chunk_count || 0} 段`, processing: 'AI 正在解析', pending: '等待建立 AI 索引', failed: 'AI 解析失败' }[resource.ingestion_status] || '等待建立 AI 索引')
 
+async function openResource (resource) {
+  try { await openFile(resource.file_path) } catch (error) { ElMessage.error(error.message) }
+}
 async function loadResources () {
   resources.value = await api(`/resources?course_id=${selected.value || ''}&query=${encodeURIComponent(query.value)}`)
 }

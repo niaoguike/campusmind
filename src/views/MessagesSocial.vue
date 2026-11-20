@@ -111,7 +111,7 @@ async function facilitateGroup () { try { const data = await post(`/conversation
 async function importProposals (summaryId) { try { const data = await post(`/conversations/${currentId.value}/summaries/${summaryId}/import-tasks`, {}); ElMessage.success(data.message); await refreshWorkspace() } catch (e) { ElMessage.error(e.message) } }
 function profile (id, agent = false) { router.push({ path: `/profile/${id}`, query: agent ? { agent: '1' } : {} }) }
 async function downloadGroupAttachment (file) { try { const response = await fetch(file.download_url, { headers: { Authorization: `Bearer ${localStorage.getItem('token') || ''}` } }); if (!response.ok) throw new Error('下载失败'); const url = URL.createObjectURL(await response.blob()), anchor = document.createElement('a'); anchor.href = url; anchor.download = file.file_name; anchor.click(); URL.revokeObjectURL(url) } catch (e) { ElMessage.error(e.message) } }
-onMounted(async () => { try { await load(); timer = setInterval(async () => { try { await refreshCurrent(); await load() } catch {} }, 4000) } catch (e) { ElMessage.error(e.message) } }); onBeforeUnmount(() => clearInterval(timer))
+onMounted(async () => { try { await load(); timer = setInterval(async () => { if (document.visibilityState !== 'visible') return; try { await refreshCurrent(); await load() } catch {} }, 4000) } catch (e) { ElMessage.error(e.message) } }); onBeforeUnmount(() => clearInterval(timer))
 </script>
 <style scoped>
 .unread{align-self:flex-start;min-width:18px;height:18px;display:grid;place-items:center;border-radius:10px;background:#c95b3d;color:#fff;font-size:10px;font-style:normal;font-weight:800}.messages time{display:block;font-size:10px;color:#af9182;margin:4px 3px}.messages .mine time{text-align:right}

@@ -4,7 +4,7 @@
       <button class="back" @click="router.push('/course')">← 返回课程资料</button>
       <header class="folder-hero"><div class="folder-icon">📁</div><div><p class="eyebrow">COURSE RESOURCE FOLDER</p><h1>{{ folder.name }}</h1><p>{{ folder.course_name }} · {{ resources.length }} 个资料文件 · 上传者：{{ folder.uploader_name || '课程管理员' }}</p><p v-if="folder.description" class="description">{{ folder.description }}</p><small v-if="folder.tags">标签：{{ folder.tags }}</small></div><button v-if="canManage" class="delete-folder" @click="removeFolder">删除文件夹</button></header>
       <div class="notice">本文件夹中的每一个已解析资料都已加入 Agent 的课程资料检索。你可以按章节路径查找并打开单个文件。</div>
-      <section class="file-list"><article v-for="resource in resources" :key="resource.id" class="file-card"><div class="file-icon">{{ icon(resource.type) }}</div><div class="main"><p class="path">{{ resource.relative_path || resource.file_name }}</p><h2>{{ resource.title }}</h2><p>{{ resource.description || '暂无说明' }}</p><small>{{ resource.file_name }} · {{ formatSize(resource.file_size) }} <em :class="resource.ingestion_status">{{ indexLabel(resource) }}</em></small><small v-if="resource.ingestion_status==='failed' && resource.ingestion_error" class="error">{{ resource.ingestion_error }}</small></div><aside><a v-if="resource.file_path" :href="resource.file_path" target="_blank">打开 / 下载</a><button v-if="canManage && resource.ingestion_status!=='processing'" @click="reprocess(resource)">重新解析</button><button v-if="canManage" class="danger" @click="removeFile(resource)">删除文件</button></aside></article><p v-if="!resources.length" class="empty">这个文件夹暂时没有资料文件。</p></section>
+      <section class="file-list"><article v-for="resource in resources" :key="resource.id" class="file-card"><div class="file-icon">{{ icon(resource.type) }}</div><div class="main"><p class="path">{{ resource.relative_path || resource.file_name }}</p><h2>{{ resource.title }}</h2><p>{{ resource.description || '暂无说明' }}</p><small>{{ resource.file_name }} · {{ formatSize(resource.file_size) }} <em :class="resource.ingestion_status">{{ indexLabel(resource) }}</em></small><small v-if="resource.ingestion_status==='failed' && resource.ingestion_error" class="error">{{ resource.ingestion_error }}</small></div><aside><button v-if="resource.file_path" @click="openResource(resource)">打开 / 下载</button><button v-if="canManage && resource.ingestion_status!=='processing'" @click="reprocess(resource)">重新解析</button><button v-if="canManage" class="danger" @click="removeFile(resource)">删除文件</button></aside></article><p v-if="!resources.length" class="empty">这个文件夹暂时没有资料文件。</p></section>
     </main>
     <main v-else class="content loading">正在加载资料文件夹…</main>
   </div>
@@ -15,7 +15,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import AppNav from '../components/AppNav.vue'
-import { api } from '../utils/api'
+import { api, openFile } from '../utils/api'
 const route=useRoute(),router=useRouter(),folder=ref(null),resources=ref([])
 const me=computed(()=>JSON.parse(localStorage.getItem('user')||'{}'))
 const canManage=computed(()=>folder.value&&(Number(folder.value.uploader_id)===Number(me.value.id)||me.value.is_admin))
@@ -23,6 +23,7 @@ const icon=type=>({note:'📄',exercise:'✎',slide:'▣'}[type]||'📄')
 const formatSize=size=>size?`${(size/1024/1024).toFixed(size<1024*1024?1:2)} MB`:'—'
 const indexLabel=resource=>({ready:`AI 已可检索 · ${resource.chunk_count||0} 段`,processing:'AI 正在解析',pending:'等待建立 AI 索引',failed:'AI 解析失败'}[resource.ingestion_status]||'等待建立 AI 索引')
 async function load(){try{const data=await api(`/resource-folders/${route.params.id}`);folder.value=data.folder;resources.value=data.resources}catch(error){ElMessage.error(error.message);router.replace('/course')}}
+async function openResource(resource){try{await openFile(resource.file_path)}catch(error){ElMessage.error(error.message)}}
 async function reprocess(resource){try{const data=await api(`/resources/${resource.id}/reprocess`,{method:'POST'});ElMessage.success(data.message);await load();setTimeout(load,1800)}catch(error){ElMessage.error(error.message)}}
 async function removeFile(resource){if(!window.confirm(`确定删除“${resource.title}”吗？`))return;try{const data=await api(`/resources/${resource.id}`,{method:'DELETE'});ElMessage.success(data.message);await load()}catch(error){ElMessage.error(error.message)}}
 async function removeFolder(){if(!window.confirm(`确定删除文件夹“${folder.value.name}”及其全部 ${resources.value.length} 个文件吗？此操作无法恢复。`))return;try{const data=await api(`/resource-folders/${folder.value.id}`,{method:'DELETE'});ElMessage.success(data.message);router.replace('/course')}catch(error){ElMessage.error(error.message)}}
