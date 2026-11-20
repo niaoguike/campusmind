@@ -7,7 +7,7 @@ import jwt from 'jsonwebtoken';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
-import { promises as fs } from 'fs';
+import { promises as fs, mkdirSync } from 'fs';
 import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
@@ -58,6 +58,11 @@ const execFileAsync = promisify(execFile);
 // starts on Monday, 2026-03-09. Future semesters can be added here.
 const SEMESTER_STARTS = { '2025-2026-2': '2026-03-09' };
 const scheduleImportCache = new Map();
+// Resource uploads can reach 60 × 20 MB, so stream them to disk instead of keeping them in memory.
+const resourceDiskStorage = multer.diskStorage({
+  destination: (req, file, cb) => { try { mkdirSync(resourceUploadDir, { recursive: true }); cb(null, resourceUploadDir); } catch (error) { cb(error); } },
+  filename: (req, file, cb) => cb(null, `${crypto.randomUUID()}${path.extname(readableUploadName(file.originalname || '')).toLowerCase()}`)
+});
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024, files: 1 },
@@ -67,7 +72,7 @@ const upload = multer({
   }
 });
 const resourceUpload = multer({
-  storage: multer.memoryStorage(),
+  storage: resourceDiskStorage,
   limits: { fileSize: 20 * 1024 * 1024, files: 1 },
   fileFilter: (req, file, cb) => {
     const allowed = /\.(pdf|doc|docx|ppt|pptx|xls|xlsx|csv|txt|png|jpe?g)$/i.test(file.originalname || '');
@@ -75,7 +80,7 @@ const resourceUpload = multer({
   }
 });
 const resourceFolderUpload = multer({
-  storage: multer.memoryStorage(),
+  storage: resourceDiskStorage,
   limits: { fileSize: 20 * 1024 * 1024, files: 60 },
   fileFilter: (req, file, cb) => {
     const allowed = /\.(pdf|doc|docx|ppt|pptx|xls|xlsx|csv|txt|png|jpe?g)$/i.test(file.originalname || '');
@@ -100,6 +105,12 @@ const avatarUpload = multer({
 });
 const resourceUploadDir = path.join(__dirname, 'uploads', 'resources');
 const resourceStoragePath = (filePath) => path.join(resourceUploadDir, path.basename(String(filePath || '')));
+async function removeResourceFiles(files) {
+  for (const file of files || []) {
+    const name = file?.filename || file?.safeName;
+    if (name) await fs.unlink(path.join(resourceUploadDir, name)).catch(() => {});
+  }
+}
 const agentUploadDir = path.join(__dirname, 'uploads', 'agent');
 const groupUploadDir = path.join(__dirname, 'uploads', 'group-agent');
 const friendAgentUploadDir = path.join(__dirname, 'uploads', 'friend-agent');
@@ -770,10 +781,11 @@ app.delete('/api/conversations/:id/members/me', auth, async (req, res) => {
 async function requireAdmin(req, res, next) {if (!(await isAdmin(req.user.id))) return res.status(403).json({ error: '仅管理员可以执行此操作' });next();}
 async function auditLog(actorId, action, target = null, detail = '') {await db.prepare('INSERT INTO admin_audit_logs (actor_id,action,target_user_id,target_student_id,detail,created_at) VALUES (?,?,?,?,?,?)').run(actorId, action, target?.id || null, target?.student_id || '', String(detail || '').slice(0, 1000), now());}
 async function removeStudentAccount(target, actorId, detail = '') {
-  const resources = await db.prepare('SELECT id,file_path FROM resources WHERE uploader_id=?').all(target.id),postIds = (await db.prepare('SELECT id FROM forum_posts WHERE author_id=?').all(target.id)).map((row) => row.id);
+  const resources = await db.prepare('SELECT id,file_path FROM resources WHERE uploader_id=?').all(target.id),postIds = (await db.prepare('SELECT id FROM forum_posts WHERE author_id=?').all(target.id)).map((row) => row.id),teacherCourseIds = (await db.prepare('SELECT course_id FROM course_teacher_assignments WHERE user_id=?').all(target.id)).map((row) => row.course_id);
   const remove = db.transaction(async () => {
     await longTermMemory.eraseUser(target.id);
     await auditLog(actorId, 'delete_account', target, detail);
+    if (teacherCourseIds.length) await auditLog(actorId, 'delete_account_teacher_courses', target, `该教师负责的课程需重新分配：${teacherCourseIds.join(',')}`);
     for (const resource of resources) {await db.prepare('DELETE FROM resource_chunks_fts WHERE resource_id=?').run(resource.id);await db.prepare('DELETE FROM resource_chunks WHERE resource_id=?').run(resource.id);await db.prepare('DELETE FROM resource_documents WHERE resource_id=?').run(resource.id);}
     for (const postId of postIds) {await db.prepare('DELETE FROM forum_votes WHERE post_id=?').run(postId);await db.prepare('DELETE FROM forum_polls WHERE post_id=?').run(postId);await db.prepare('DELETE FROM forum_comments WHERE post_id=?').run(postId);}
     await db.prepare('DELETE FROM forum_votes WHERE user_id=?').run(target.id);await db.prepare('DELETE FROM forum_comments WHERE author_id=?').run(target.id);await db.prepare('DELETE FROM forum_posts WHERE author_id=?').run(target.id);
@@ -840,20 +852,18 @@ app.get('/api/resources/files/:fileName', (req, res) => {const fileName = path.b
 app.get('/api/resources', auth, async (req, res) => {const query = (req.query.query || '').trim(),courseId = Number(req.query.course_id || 0);if (courseId && !(await isCourseMember(courseId, req.user.id))) return res.status(403).json({ error: '请先加入本课程' });let sql = "SELECT r.*,c.name course_name,u.name uploader_name,f.name folder_name,f.description folder_description,f.tags folder_tags,COALESCE(d.status,CASE WHEN r.file_path!='' THEN 'pending' ELSE 'not_applicable' END) ingestion_status,COALESCE(d.error_message,'') ingestion_error,COALESCE(d.chunk_count,0) chunk_count FROM resources r JOIN courses c ON c.id=r.course_id LEFT JOIN users u ON u.id=r.uploader_id LEFT JOIN resource_folders f ON f.id=r.folder_id LEFT JOIN resource_documents d ON d.resource_id=r.id WHERE 1=1",values = [];if (courseId) {sql += ' AND r.course_id=?';values.push(courseId);}if (query) {sql += " AND (r.title ILIKE ? OR r.description ILIKE ? OR r.tags ILIKE ? OR r.file_name ILIKE ? OR f.name ILIKE ? OR r.relative_path ILIKE ?)";values.push(`%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`);}res.json(await db.prepare(`${sql} ORDER BY r.is_pinned DESC,r.folder_id DESC,r.relative_path ASC,r.id DESC`).all(...values));});
 app.get('/api/resource-folders/:id', auth, async (req, res) => {const folder = await db.prepare("SELECT f.*,c.name course_name,c.color,u.name uploader_name FROM resource_folders f JOIN courses c ON c.id=f.course_id LEFT JOIN users u ON u.id=f.uploader_id WHERE f.id=?").get(req.params.id);if (!folder) return res.status(404).json({ error: '资料文件夹不存在' });const resources = await db.prepare("SELECT r.*,COALESCE(d.status,CASE WHEN r.file_path!='' THEN 'pending' ELSE 'not_applicable' END) ingestion_status,COALESCE(d.error_message,'') ingestion_error,COALESCE(d.chunk_count,0) chunk_count FROM resources r LEFT JOIN resource_documents d ON d.resource_id=r.id WHERE r.folder_id=? ORDER BY r.relative_path ASC,r.id ASC").all(folder.id);res.json({ folder, resources });});
 app.post('/api/resources', auth, async (req, res) => {const { course_id, title, description = '', type = 'note', tags = '', url = '' } = req.body;if (!course_id || !title) return res.status(400).json({ error: '请选择课程并填写资料标题' });if (!(await managesCourse(req.user.id, Number(course_id)))) return res.status(403).json({ error: '只有课程教师可以上传资料' });const result = await db.prepare('INSERT INTO resources (course_id,title,description,type,tags,url,uploader_id) VALUES (?,?,?,?,?,?,?)').run(course_id, title.trim(), description.trim(), type, tags.trim(), url.trim(), req.user.id);res.status(201).json({ id: result.insertId, message: '链接资料已发布' });});
-app.post('/api/resources/upload', auth, resourceUpload.single('file'), async (req, res) => {const courseId = Number(req.body.course_id || 0),file = req.file,title = String(req.body.title || '').trim(),description = String(req.body.description || '').trim(),tags = String(req.body.tags || '').trim(),type = String(req.body.type || 'note').trim();if (!courseId || !(await db.prepare('SELECT 1 FROM courses WHERE id=?').get(courseId))) return res.status(400).json({ error: '请选择有效课程' });if (!(await managesCourse(req.user.id, courseId))) return res.status(403).json({ error: '只有课程教师可以上传资料' });if (!file) return res.status(400).json({ error: '请选择要上传的资料文件' });const originalName = readableUploadName(file.originalname),ext = path.extname(originalName).toLowerCase(),safeName = `${crypto.randomUUID()}${ext}`,filePath = path.join(resourceUploadDir, safeName);try {await fs.mkdir(resourceUploadDir, { recursive: true });await fs.writeFile(filePath, file.buffer);const result = await db.prepare('INSERT INTO resources (course_id,title,description,type,tags,file_path,file_name,file_size,uploader_id) VALUES (?,?,?,?,?,?,?,?,?)').run(courseId, (title || path.basename(originalName, ext)).slice(0, 100), description.slice(0, 2000), type.slice(0, 30), tags.slice(0, 300), `/api/resources/files/${safeName}`, originalName.slice(0, 255), file.size, req.user.id);queueResourceIndex(Number(result.insertId));res.status(201).json({ id: result.insertId, message: '资料文件已上传，正在建立 AI 检索索引' });} catch (error) {try {await fs.unlink(filePath);} catch {};res.status(500).json({ error: '文件保存失败，请稍后重试' });}});
+app.post('/api/resources/upload', auth, resourceUpload.single('file'), async (req, res) => {const courseId = Number(req.body.course_id || 0),file = req.file,title = String(req.body.title || '').trim(),description = String(req.body.description || '').trim(),tags = String(req.body.tags || '').trim(),type = String(req.body.type || 'note').trim();if (!courseId || !(await db.prepare('SELECT 1 FROM courses WHERE id=?').get(courseId))) {await removeResourceFiles([file]);return res.status(400).json({ error: '请选择有效课程' });}if (!(await managesCourse(req.user.id, courseId))) {await removeResourceFiles([file]);return res.status(403).json({ error: '只有课程教师可以上传资料' });}if (!file) return res.status(400).json({ error: '请选择要上传的资料文件' });const originalName = readableUploadName(file.originalname),ext = path.extname(originalName).toLowerCase(),safeName = file.filename,filePath = path.join(resourceUploadDir, safeName);try {const result = await db.prepare('INSERT INTO resources (course_id,title,description,type,tags,file_path,file_name,file_size,uploader_id) VALUES (?,?,?,?,?,?,?,?,?)').run(courseId, (title || path.basename(originalName, ext)).slice(0, 100), description.slice(0, 2000), type.slice(0, 30), tags.slice(0, 300), `/api/resources/files/${safeName}`, originalName.slice(0, 255), file.size, req.user.id);queueResourceIndex(Number(result.insertId));res.status(201).json({ id: result.insertId, message: '资料文件已上传，正在建立 AI 检索索引' });} catch (error) {await removeResourceFiles([file]);res.status(500).json({ error: '文件保存失败，请稍后重试' });}});
 app.post('/api/resources/upload-folder', auth, resourceFolderUpload.array('files', 60), async (req, res) => {
   const courseId = Number(req.body.course_id || 0),files = req.files || [],description = String(req.body.description || '').trim(),tags = String(req.body.tags || '').trim(),type = String(req.body.type || 'note').trim();
-  if (!courseId || !(await db.prepare('SELECT 1 FROM courses WHERE id=?').get(courseId))) return res.status(400).json({ error: '请选择有效课程' });
-  if (!(await managesCourse(req.user.id, courseId))) return res.status(403).json({ error: '只有课程教师可以上传资料' });
+  if (!courseId || !(await db.prepare('SELECT 1 FROM courses WHERE id=?').get(courseId))) {await removeResourceFiles(files);return res.status(400).json({ error: '请选择有效课程' });}
+  if (!(await managesCourse(req.user.id, courseId))) {await removeResourceFiles(files);return res.status(403).json({ error: '只有课程教师可以上传资料' });}
   if (!files.length) return res.status(400).json({ error: '请先选择包含课程资料的文件夹' });
   let relativePaths = [];try {relativePaths = JSON.parse(req.body.relative_paths || '[]');} catch {relativePaths = [];}
   const proposed = String(req.body.folder_name || req.body.title || '课程资料文件夹').trim();
   const folderName = proposed.slice(0, 100) || '课程资料文件夹',saved = [];
   try {
-    await fs.mkdir(resourceUploadDir, { recursive: true });
     for (const [index, file] of files.entries()) {
-      const originalName = readableUploadName(file.originalname),ext = path.extname(originalName).toLowerCase(),safeName = `${crypto.randomUUID()}${ext}`;
-      await fs.writeFile(path.join(resourceUploadDir, safeName), file.buffer);
+      const originalName = readableUploadName(file.originalname),safeName = file.filename;
       const requested = String(relativePaths[index] || originalName).replace(/\\/g, '/').replace(/^\/+/, '');
       const relativePath = requested.split('/').filter((part) => part && part !== '.' && part !== '..').join('/').slice(0, 500) || originalName;
       saved.push({ file, originalName, safeName, relativePath });
@@ -866,7 +876,7 @@ app.post('/api/resources/upload-folder', auth, resourceFolderUpload.array('files
     });
     const result = await create();result.ids.forEach(queueResourceIndex);
     res.status(201).json({ folder_id: result.folderId, uploaded: result.ids.length, message: `已上传“${folderName}”文件夹中的 ${result.ids.length} 个文件，正在建立 AI 检索索引` });
-  } catch (error) {for (const item of saved) await fs.unlink(path.join(resourceUploadDir, item.safeName)).catch(() => {});res.status(500).json({ error: '文件夹上传失败，已撤回本次已保存文件，请稍后重试' });}
+  } catch (error) {await removeResourceFiles(saved);res.status(500).json({ error: '文件夹上传失败，已撤回本次已保存文件，请稍后重试' });}
 });
 app.delete('/api/resource-folders/:id', auth, async (req, res) => {const folder = await db.prepare('SELECT * FROM resource_folders WHERE id=?').get(req.params.id);if (!folder) return res.status(404).json({ error: '资料文件夹不存在' });if (folder.uploader_id !== req.user.id && !(await isAdmin(req.user.id))) return res.status(403).json({ error: '只能删除自己上传的资料文件夹' });const resources = await db.prepare('SELECT id,file_path FROM resources WHERE folder_id=?').all(folder.id);const remove = db.transaction(async () => {for (const resource of resources) {await db.prepare('DELETE FROM resource_chunks_fts WHERE resource_id=?').run(resource.id);await db.prepare('DELETE FROM resource_chunks WHERE resource_id=?').run(resource.id);await db.prepare('DELETE FROM resource_documents WHERE resource_id=?').run(resource.id);}await db.prepare('DELETE FROM resources WHERE folder_id=?').run(folder.id);await db.prepare('DELETE FROM resource_folders WHERE id=?').run(folder.id);});await remove();for (const resource of resources) {if (!resource.file_path) continue;await fs.unlink(resourceStoragePath(resource.file_path)).catch(() => {});}res.json({ message: '资料文件夹及其中所有文件、AI 检索索引已删除' });});
 app.post('/api/resources/:id/reprocess', auth, async (req, res) => {const resource = await db.prepare('SELECT * FROM resources WHERE id=?').get(req.params.id);if (!resource) return res.status(404).json({ error: '资料不存在' });if (resource.uploader_id !== req.user.id && !(await isAdmin(req.user.id))) return res.status(403).json({ error: '只能重新处理自己发布的资料' });if (!resource.file_path) return res.status(400).json({ error: '链接资料不能建立正文索引，请上传资料文件' });queueResourceIndex(resource.id);res.json({ message: '已开始重新解析，请稍后刷新资料列表查看状态' });});
