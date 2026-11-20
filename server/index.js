@@ -2710,7 +2710,7 @@ app.delete('/api/teacher/courses/:courseId/assistants/:userId', auth, requireCou
 app.delete('/api/teacher/courses/:courseId', auth, requireCourseTeacher, async (req, res) => {
   const course = await db.prepare('SELECT * FROM courses WHERE id=?').get(req.courseId);
   if (!course) return res.status(404).json({ error: '课程不存在' });
-  const space = await courseSpaceOf(req.courseId),resources = await db.prepare('SELECT id,file_path FROM resources WHERE course_id=?').all(req.courseId),postIds = (await db.prepare('SELECT id FROM forum_posts WHERE course_id=?').all(req.courseId)).map((row) => row.id),submissionFiles = (await db.prepare('SELECT s.attachment_path FROM teacher_task_submissions s JOIN teacher_tasks t ON t.id=s.task_id WHERE t.course_id=?').all(req.courseId)).map((row) => row.attachment_path).filter(Boolean);
+  const space = await courseSpaceOf(req.courseId),resources = await db.prepare('SELECT id,file_path FROM resources WHERE course_id=?').all(req.courseId),postIds = (await db.prepare('SELECT id FROM forum_posts WHERE course_id=?').all(req.courseId)).map((row) => row.id),submissionFiles = (await db.prepare('SELECT s.attachment_path FROM teacher_task_submissions s JOIN teacher_tasks t ON t.id=s.task_id WHERE t.course_id=?').all(req.courseId)).map((row) => row.attachment_path).filter(Boolean),groupFiles = space ? (await db.prepare('SELECT file_path FROM group_attachments WHERE conversation_id=?').all(space.conversation_id)).map((row) => row.file_path).filter(Boolean) : [];
   await db.transaction(async () => {
     if (space) {
       await db.prepare('DELETE FROM group_attachments WHERE conversation_id=?').run(space.conversation_id);
@@ -2732,6 +2732,7 @@ app.delete('/api/teacher/courses/:courseId', auth, requireCourseTeacher, async (
       await db.prepare('DELETE FROM conversation_members WHERE conversation_id=?').run(space.conversation_id);
       await db.prepare('DELETE FROM conversations WHERE id=?').run(space.conversation_id);
     }
+    await db.prepare('DELETE FROM teacher_forum_actions WHERE post_id IN (SELECT id FROM forum_posts WHERE course_id=?)').run(req.courseId);
     for (const postId of postIds) {
       await db.prepare('DELETE FROM forum_votes WHERE post_id=?').run(postId);
       await db.prepare('DELETE FROM forum_polls WHERE post_id=?').run(postId);
@@ -2757,6 +2758,7 @@ app.delete('/api/teacher/courses/:courseId', auth, requireCourseTeacher, async (
   })();
   for (const resource of resources) {if (resource.file_path) await fs.unlink(resourceStoragePath(resource.file_path)).catch(() => {});}
   for (const filePath of submissionFiles) await fs.unlink(path.join(submissionUploadDir, path.basename(filePath))).catch(() => {});
+  for (const filePath of groupFiles) await fs.unlink(path.join(groupUploadDir, path.basename(filePath))).catch(() => {});
   await auditLog(req.user.id, 'delete_course', null, `删除课程“${course.name}”`);
   res.json({ message: `课程“${course.name}”及其资料、作业与群聊已删除` });
 });
