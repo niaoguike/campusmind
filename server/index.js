@@ -2630,6 +2630,8 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', agent: 'langchain'
 app.use((error, req, res, next) => {
   console.error('API request failed:', /^[A-Z0-9_]+$/.test(error.code || '') ? error.code : 'REQUEST_FAILED');
   if (res.headersSent) return res.end();
+  if (error.name === 'MulterError') return res.status(400).json({ error: error.code === 'LIMIT_FILE_SIZE' ? '单个文件超过大小上限' : error.code === 'LIMIT_FILE_COUNT' ? '文件数量超过上限' : '上传内容不符合要求' });
+  if (error.message && /[一-龥]/.test(error.message)) return res.status(400).json({ error: error.message });
   res.status(500).json({ error: '请求处理失败，请稍后重试' });
 });
 const PORT = process.env.PORT || 3001;
