@@ -28,7 +28,7 @@ import { api } from '../utils/api'
 import { sessionUser, clearSession } from '../utils/session'
 const router = useRouter()
 const user = computed(() => sessionUser.value || {})
-const visibleLinks=computed(()=>user.value.role==='teacher'?[{to:'/teacher',label:'教师工作台',icon:'▣'},{to:'/courses',label:'课程空间',icon:'▤'},{to:'/messages',label:'联络与协作',icon:'◉'},{to:'/community',label:'校园论坛',icon:'◇'},{to:'/home',label:'我的 Agent',icon:'✦'}]:links)
+const visibleLinks=computed(()=>user.value.role==='teacher'?[{to:'/teacher',label:'教师工作台',icon:'▣'},{to:'/course',label:'课程资料',icon:'●'},{to:'/courses',label:'课程空间',icon:'▤'},{to:'/messages',label:'联络与协作',icon:'◉'},{to:'/community',label:'校园论坛',icon:'◇'},{to:'/home',label:'我的 Agent',icon:'✦'}]:links)
 const announcements = ref([])
 const showAnnouncements = ref(false)
 const links = [
