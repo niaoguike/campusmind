@@ -6,7 +6,7 @@ export async function api(path, options = {}) {
   const headers = { ...(options.body && !isFormData ? { 'Content-Type': 'application/json' } : {}), ...(options.headers || {}) }
   const token = localStorage.getItem('token')
   if (token) headers.Authorization = `Bearer ${token}`
-  const response = await fetch(`/api${path}`, { ...fetchOptions, headers })
+  const response = await fetch(fileUrl(path), { ...fetchOptions, headers })
   const data = await response.json().catch(() => ({}))
   if (response.status === 401) {
     clearSession()
@@ -18,10 +18,13 @@ export async function api(path, options = {}) {
 
 export const post = (path, payload) => api(path, { method: 'POST', body: JSON.stringify(payload) })
 
+// Stored file paths already start with /api, while route names passed by callers do not.
+const fileUrl = (path) => `/api${String(path).replace(/^\/api(?=\/)/, '')}`
+
 // Authenticated files cannot be opened by a plain href; fetch a blob first.
 export async function openFile (path) {
   const token = localStorage.getItem('token')
-  const response = await fetch(`/api${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+  const response = await fetch(fileUrl(path), { headers: token ? { Authorization: `Bearer ${token}` } : {} })
   if (response.status === 401) { clearSession(); window.location.href = '/login?reason=session_expired'; return }
   if (!response.ok) throw new Error('文件不存在或无权访问')
   const url = URL.createObjectURL(await response.blob())
@@ -35,7 +38,7 @@ export async function openFile (path) {
 
 export async function downloadFile (path, fileName) {
   const token = localStorage.getItem('token')
-  const response = await fetch(`/api${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+  const response = await fetch(fileUrl(path), { headers: token ? { Authorization: `Bearer ${token}` } : {} })
   if (response.status === 401) { clearSession(); window.location.href = '/login?reason=session_expired'; return }
   if (!response.ok) throw new Error('文件不存在或无权访问')
   const url = URL.createObjectURL(await response.blob())
