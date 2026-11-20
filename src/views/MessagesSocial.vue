@@ -67,7 +67,7 @@ const formatTime = value => {
   const date = new Date(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text) ? `${text.replace(' ', 'T')}Z` : text)
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 }
-async function load () { const data=await Promise.all([api('/conversations'), api('/friends'), api('/friend-requests'), api('/friend-agent/requests'), me.value.role==='student'?api('/teachers'):Promise.resolve([])]);[conversations.value, friends.value, requests.value, friendAgentRequests.value, teachers.value]=data; const requestedId = Number(route.query.conversation_id || 0); const target = requestedId && conversations.value.some(item => item.id === requestedId) ? requestedId : conversations.value[0]?.id; if (target && (!currentId.value || requestedId)) await open(target) }
+async function load () { const data=await Promise.all([api('/conversations'), api('/friends'), api('/friend-requests'), api('/friend-agent/requests'), me.value.role==='student'?api('/teachers'):Promise.resolve([])]);[conversations.value, friends.value, requests.value, friendAgentRequests.value, teachers.value]=data; const requestedId = Number(route.query.conversation_id || 0); const hasRequested = Boolean(requestedId) && conversations.value.some(item => item.id === requestedId); const target = hasRequested ? requestedId : conversations.value[0]?.id; if (target && (!currentId.value || hasRequested)) await open(target); if (requestedId) { const query = { ...route.query }; delete query.conversation_id; await router.replace({ query }) } }
 async function handleConversationRemoved () {
   currentId.value = null
   messages.value = []
