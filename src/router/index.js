@@ -1,7 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import Login from '../views/Login.vue'
 import Home from '../views/AgentWorkspace.vue'
-import Course from '../views/Course.vue'
 import AdminConsole from '../views/AdminConsole.vue'
 import SetupKey from '../views/SetupKey.vue'
 import Dashboard from '../views/Dashboard.vue'

@@ -34,9 +34,13 @@ BEGIN
   FOR item IN
     SELECT c.id, c.name, c.college, c.class_name, a.user_id AS teacher_id, u.name AS teacher_name
     FROM courses c
-    JOIN course_teacher_assignments a ON a.course_id = c.id
+    JOIN LATERAL (
+      SELECT a.user_id FROM course_teacher_assignments a
+      WHERE a.course_id = c.id ORDER BY a.user_id LIMIT 1
+    ) a ON TRUE
     JOIN users u ON u.id = a.user_id
     WHERE NOT EXISTS (SELECT 1 FROM course_spaces s WHERE s.course_id = c.id)
+    ORDER BY c.id
   LOOP
     INSERT INTO conversations (title, type, owner_id)
     VALUES (LEFT(CONCAT_WS('-', NULLIF(item.name, ''), NULLIF(item.college, ''), NULLIF(item.class_name, ''), item.teacher_name), 120), 'group', item.teacher_id)

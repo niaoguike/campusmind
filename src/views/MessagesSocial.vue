@@ -67,7 +67,7 @@ const formatTime = value => {
   const date = new Date(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text) ? `${text.replace(' ', 'T')}Z` : text)
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 }
-async function load () { const data=await Promise.all([api('/conversations'), api('/friends'), api('/friend-requests'), api('/friend-agent/requests'), me.value.role==='student'?api('/teachers'):Promise.resolve([])]);[conversations.value, friends.value, requests.value, friendAgentRequests.value, teachers.value]=data; const requestedId = Number(route.query.conversation_id || 0); const target = requestedId && conversations.value.some(item => item.id === requestedId) ? requestedId : conversations.value[0]?.id; if (target && (!currentId.value || requestedId)) await open(target) }
+async function load () { const data=await Promise.all([api('/conversations'), api('/friends'), api('/friend-requests'), api('/friend-agent/requests'), me.value.role==='student'?api('/teachers'):Promise.resolve([])]);[conversations.value, friends.value, requests.value, friendAgentRequests.value, teachers.value]=data; const requestedId = Number(route.query.conversation_id || 0); const hasRequested = Boolean(requestedId) && conversations.value.some(item => item.id === requestedId); const target = hasRequested ? requestedId : conversations.value[0]?.id; if (target && (!currentId.value || hasRequested)) await open(target); if (requestedId) { const query = { ...route.query }; delete query.conversation_id; await router.replace({ query }) } }
 async function handleConversationRemoved () {
   currentId.value = null
   messages.value = []
@@ -111,7 +111,7 @@ async function facilitateGroup () { try { const data = await post(`/conversation
 async function importProposals (summaryId) { try { const data = await post(`/conversations/${currentId.value}/summaries/${summaryId}/import-tasks`, {}); ElMessage.success(data.message); await refreshWorkspace() } catch (e) { ElMessage.error(e.message) } }
 function profile (id, agent = false) { router.push({ path: `/profile/${id}`, query: agent ? { agent: '1' } : {} }) }
 async function downloadGroupAttachment (file) { try { const response = await fetch(file.download_url, { headers: { Authorization: `Bearer ${localStorage.getItem('token') || ''}` } }); if (!response.ok) throw new Error('下载失败'); const url = URL.createObjectURL(await response.blob()), anchor = document.createElement('a'); anchor.href = url; anchor.download = file.file_name; anchor.click(); URL.revokeObjectURL(url) } catch (e) { ElMessage.error(e.message) } }
-onMounted(async () => { try { await load(); timer = setInterval(async () => { try { await refreshCurrent(); await load() } catch {} }, 4000) } catch (e) { ElMessage.error(e.message) } }); onBeforeUnmount(() => clearInterval(timer))
+onMounted(async () => { try { await load(); timer = setInterval(async () => { if (document.visibilityState !== 'visible') return; try { await refreshCurrent(); await load() } catch {} }, 4000) } catch (e) { ElMessage.error(e.message) } }); onBeforeUnmount(() => clearInterval(timer))
 </script>
 <style scoped>
 .unread{align-self:flex-start;min-width:18px;height:18px;display:grid;place-items:center;border-radius:10px;background:#c95b3d;color:#fff;font-size:10px;font-style:normal;font-weight:800}.messages time{display:block;font-size:10px;color:#af9182;margin:4px 3px}.messages .mine time{text-align:right}

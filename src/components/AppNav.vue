@@ -6,7 +6,7 @@
     </nav>
     <div class="nav-user">
       <div class="notice-wrap">
-        <button class="notice-button" title="平台公告" @click="toggleAnnouncements">🔔<i v-if="announcements.length"></i></button>
+        <button class="notice-button" title="平台公告" @click="toggleAnnouncements">🔔<i v-if="announcementUnread"></i></button>
         <section v-if="showAnnouncements" class="notice-panel">
           <div class="notice-title"><b>平台公告</b><button @click="showAnnouncements=false">×</button></div>
           <article v-for="item in announcements" :key="item.id" class="notice-item"><b>{{ item.is_pinned ? '置顶 · ' : '' }}{{ item.title }}</b><p>{{ item.content }}</p></article>
@@ -28,9 +28,11 @@ import { api } from '../utils/api'
 import { sessionUser, clearSession } from '../utils/session'
 const router = useRouter()
 const user = computed(() => sessionUser.value || {})
-const visibleLinks=computed(()=>user.value.role==='teacher'?[{to:'/teacher',label:'教师工作台',icon:'▣'},{to:'/courses',label:'课程空间',icon:'▤'},{to:'/messages',label:'联络与协作',icon:'◉'},{to:'/community',label:'校园论坛',icon:'◇'},{to:'/home',label:'我的 Agent',icon:'✦'}]:links)
+const visibleLinks=computed(()=>user.value.role==='teacher'?[{to:'/teacher',label:'教师工作台',icon:'▣'},{to:'/course',label:'课程资料',icon:'●'},{to:'/courses',label:'课程空间',icon:'▤'},{to:'/messages',label:'联络与协作',icon:'◉'},{to:'/community',label:'校园论坛',icon:'◇'},{to:'/home',label:'我的 Agent',icon:'✦'}]:links)
 const announcements = ref([])
 const showAnnouncements = ref(false)
+const seenAt = ref(localStorage.getItem('announcements_seen_at') || '')
+const announcementUnread = computed(() => announcements.value.some((item) => (item.updated_at || item.created_at || '') > seenAt.value))
 const links = [
   { to: '/favorites', label: '收藏题库', icon: '★' },
   { to: '/quiz', label: 'AI 答题', icon: '✦' },
@@ -39,7 +41,8 @@ const links = [
   { to: '/community', label: '校园论坛', icon: '◇' }
 ]
 async function loadAnnouncements () { try { announcements.value = await api('/announcements') } catch { announcements.value = [] } }
-function toggleAnnouncements () { showAnnouncements.value = !showAnnouncements.value; if (showAnnouncements.value) loadAnnouncements() }
+function markAnnouncementsSeen () { const stamp = announcements.value[0]?.updated_at || announcements.value[0]?.created_at || new Date().toISOString(); seenAt.value = stamp; localStorage.setItem('announcements_seen_at', stamp) }
+function toggleAnnouncements () { showAnnouncements.value = !showAnnouncements.value; if (showAnnouncements.value) loadAnnouncements().then(markAnnouncementsSeen) }
 function logout () { clearSession(); router.push('/login') }
 onMounted(loadAnnouncements)
 </script>

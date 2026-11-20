@@ -17,6 +17,17 @@ async function call(user, url, method = 'GET', body, status = 200) {
   const r = await fetch(`http://127.0.0.1:${port}/api${url}`, { method, headers: { Authorization: `Bearer ${jwt.sign({ id: user }, secret)}`, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
   const data = await r.json();assert.equal(r.status, status, `${method} ${url}: ${JSON.stringify(data)}`);checks++;return data;
 }
+async function upload(user, url, fields = {}, fileName = 'note.txt', status = 201) {
+  const form = new FormData();
+  for (const [key, value] of Object.entries(fields)) form.append(key, String(value));
+  form.append('file', new Blob(['hello course material'], { type: 'text/plain' }), fileName);
+  const r = await fetch(`http://127.0.0.1:${port}/api${url}`, { method: 'POST', headers: { Authorization: `Bearer ${jwt.sign({ id: user }, secret)}` }, body: form });
+  const data = await r.json().catch(() => ({}));assert.equal(r.status, status, `UPLOAD ${url}: ${JSON.stringify(data)}`);checks++;return data;
+}
+async function download(user, url, status = 200) {
+  const r = await fetch(`http://127.0.0.1:${port}/api${url}`, { headers: { Authorization: `Bearer ${jwt.sign({ id: user }, secret)}` } });
+  assert.equal(r.status, status, `DOWNLOAD ${url}`);checks++;return r;
+}
 try {
   for (let i = 0; i < 600; i++) {if (output.includes('CampusMind server:')) break;if (child.exitCode !== null) throw new Error(output);await new Promise((r) => setTimeout(r, 100));}
   assert.match(output, /CampusMind server:/);
@@ -132,6 +143,37 @@ try {
   assert.equal(studentRegistration.user.role, 'student');
   await call(studentRegistration.user.id, '/teacher/dashboard', 'GET', undefined, 403);
   await call(studentRegistration.user.id, '/dashboard');
+  // Resource upload, membership-scoped download and task attachments.
+  const material = await upload(registered.user.id, '/resources/upload', { course_id: created.id, title: 'week 1' });
+  const materialRow = await db.prepare('SELECT file_path FROM resources WHERE id=?').get(material.id);
+  await call(studentRegistration.user.id, `/resources?course_id=${created.id}`, 'GET', undefined, 403);
+  await download(studentRegistration.user.id, materialRow.file_path.replace('/api', ''), 404);
+  await call(studentRegistration.user.id, `/courses/${created.id}/join`, 'POST', { invite_code: created.invite_code });
+  const joinRow = await db.prepare('SELECT id FROM course_join_requests WHERE course_id=? AND student_id=?').get(created.id, studentRegistration.user.id);
+  await call(registered.user.id, `/teacher/course-join-requests/${joinRow.id}`, 'PATCH', { action: 'approve' });
+  await download(studentRegistration.user.id, materialRow.file_path.replace('/api', ''));
+  assert((await call(registered.user.id, `/courses/${created.id}/members?limit=1`)).total >= 1);
+  const createdTask = await call(registered.user.id, `/teacher/courses/${created.id}/tasks`, 'POST', { title: 'Homework', published: true }, 201);
+  await upload(studentRegistration.user.id, `/teacher-tasks/${createdTask.id}/submit`, { content: 'my answer' }, 'answer.txt');
+  const submissionRow = await db.prepare('SELECT attachment_path FROM teacher_task_submissions WHERE task_id=? AND student_id=?').get(createdTask.id, studentRegistration.user.id);
+  await download(studentRegistration.user.id, submissionRow.attachment_path.replace('/api', ''));
+  await download(outsider, submissionRow.attachment_path.replace('/api', ''), 404);
+  await download(registered.user.id, `/teacher/tasks/${createdTask.id}/submissions.csv`);
+  // Assistants can manage the course, and removal is blocked only for the last teacher.
+  await call(registered.user.id, `/teacher/courses/${created.id}/assistants`, 'POST', { user_id: teacher }, 201);
+  await call(teacher, `/teacher/courses/${created.id}/analytics`);
+  await call(registered.user.id, `/teacher/courses/${created.id}/assistants/${teacher}`, 'DELETE');
+  // Forum feed hides course posts from non-members.
+  const coursePost = await call(student, '/forum/posts', 'POST', { title: 'Course only', content: 'members only', course_id: a }, 201);
+  assert(!(await call(outsider, '/forum/posts')).some((p) => p.id === coursePost.id));
+  await call(outsider, `/forum/posts/${coursePost.id}`, 'GET', undefined, 403);
+  // Archive blocks writes, member removal revokes download, delete removes the course.
+  await call(registered.user.id, `/teacher/courses/${created.id}/archive`, 'PATCH', { archived: true });
+  await upload(registered.user.id, '/resources/upload', { course_id: created.id }, 'later.txt', 400);
+  await call(registered.user.id, `/teacher/courses/${created.id}/members/${studentRegistration.user.id}`, 'DELETE');
+  await download(studentRegistration.user.id, materialRow.file_path.replace('/api', ''), 404);
+  await call(registered.user.id, `/teacher/courses/${created.id}`, 'DELETE');
+  assert.equal((await call(registered.user.id, '/teacher/dashboard')).courses.length, 0);
   console.log(`PASS: ${checks} API checks; isolated database only.`);
 } finally {
   child.kill();if (child.exitCode === null) await once(child, 'exit');await fixture.close();
