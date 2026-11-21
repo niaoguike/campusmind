@@ -48,12 +48,17 @@ jobs:
       - name: Install server dependencies
         working-directory: server
         run: npm ci
+      - name: Dependency audit (non-blocking)
+        working-directory: server
+        continue-on-error: true
+        run: npm audit --omit=dev --audit-level=high
       - name: Syntax checks
         working-directory: server
         run: |
           node --check index.js
           node --check db/database.js
           node --check db/migrate.js
+          node --check scripts/validateConstraints.mjs
           node --check tests/teacher-portal.mjs
       - name: Teacher portal API tests
         working-directory: server

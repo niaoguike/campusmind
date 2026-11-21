@@ -71,8 +71,11 @@ try {
   assert(spaceA?.invite_code && spaceB?.invite_code);
   await call(student, '/courses/join', 'POST', { invite_code: spaceA.invite_code }, 201);
   await call(outsider, '/courses/join', 'POST', { invite_code: spaceB.invite_code }, 201);
-  const studentJoin = await db.prepare("SELECT id FROM course_join_requests WHERE course_id=? AND student_id=?").get(a, student);
+  const studentJoin = await db.prepare("SELECT id,requested_at FROM course_join_requests WHERE course_id=? AND student_id=?").get(a, student);
+  await call(student, '/courses/join', 'POST', { invite_code: spaceA.invite_code }, 200);
+  assert.equal((await db.prepare('SELECT requested_at FROM course_join_requests WHERE id=?').get(studentJoin.id)).requested_at, studentJoin.requested_at, '重复申请不应重置申请时间');
   await call(teacher, `/teacher/course-join-requests/${studentJoin.id}`, 'PATCH', { action: 'approve' });
+  await call(teacher, `/teacher/course-join-requests/${studentJoin.id}`, 'PATCH', { action: 'approve' }, 409);
   const outsiderJoin = await db.prepare("SELECT id FROM course_join_requests WHERE course_id=? AND student_id=?").get(b, outsider);
   await call(other, `/teacher/course-join-requests/${outsiderJoin.id}`, 'PATCH', { action: 'approve' });
   await call(student, `/teacher-tasks/${task.id}/submit`, 'POST', { content: 'work' }, 201);
@@ -111,6 +114,16 @@ try {
   await call(admin, `/admin/users/${teacher}/teacher`, 'POST', { course_ids: [] });
   await call(teacher, `/teacher/tasks/${task.id}/submissions`, 'GET', undefined, 403);
   await call(student, '/dashboard');
+  await call(student, '/schedules', 'POST', { course_name: 'Math', weekday: 9, start_time: '08:00', end_time: '09:30' }, 400);
+  await call(student, '/schedules', 'POST', { course_name: 'Math', weekday: 1, start_time: '8:00', end_time: '09:30' }, 400);
+  await call(student, '/schedules', 'POST', { course_name: 'Math', weekday: 1, start_time: '08:00', end_time: '09:30' }, 201);
+  await call(student, '/plans', 'POST', { title: 'Plan', content: 'Body', due_date: '2026/01/01' }, 400);
+  await call(student, '/plans', 'POST', { title: 'Plan', content: 'Body', due_date: '2026-01-01', status: 'waiting' }, 400);
+  await call(student, '/plans', 'POST', { title: 'Plan', content: 'Body', due_date: '2026-01-01' }, 201);
+  const quizRow = Number((await db.prepare("INSERT INTO quizzes (user_id,course_id,topic,title,quiz_json,total_score,status) VALUES (?,?,?,?,?,?, 'created')").run(student, a, 'topic', 'Quiz', JSON.stringify({ questions: [{ id: 'q1', type: 'single', stem: 'Pick A', options: ['A', 'B'], answer: ['A'], explanation: 'A is right', source: 'test', score: 10 }] }), 10)).insertId);
+  await call(student, `/quizzes/${quizRow}/submit`, 'POST', { answers: { q1: 'A' } });
+  await call(student, `/quizzes/${quizRow}/submit`, 'POST', { answers: { q1: 'A' } }, 409);
+  assert.equal((await db.prepare('SELECT status FROM quizzes WHERE id=?').get(quizRow)).status, 'graded');
   const registration = { role: 'teacher', teacher_id: 'T-2026001', name: 'Teacher registration', phone: '13812340001', college: 'Engineering', password: 'secure-test-password' };
   const registered = await call(student, '/register', 'POST', registration, 201);
   assert.equal(registered.user.role, 'teacher');
@@ -174,6 +187,21 @@ try {
   await download(studentRegistration.user.id, materialRow.file_path.replace('/api', ''), 404);
   await call(registered.user.id, `/teacher/courses/${created.id}`, 'DELETE');
   assert.equal((await call(registered.user.id, '/teacher/dashboard')).courses.length, 0);
+  // Message pagination returns the newest page first and older pages before it without moving the read cursor backwards.
+  const conversation = Number((await db.prepare("INSERT INTO conversations (title,type,owner_id) VALUES ('paging','group',?)").run(student)).insertId);
+  await db.prepare('INSERT INTO conversation_members (conversation_id,user_id) VALUES (?,?)').run(conversation, student);
+  for (let i = 1; i <= 5; i++) await db.prepare("INSERT INTO messages (conversation_id,sender_id,content) VALUES (?,?,?)").run(conversation, student, `msg-${i}`);
+  const newest = await call(student, `/conversations/${conversation}/messages?limit=2`);
+  assert.deepEqual(newest.map((m) => m.content), ['msg-4', 'msg-5']);
+  const older = await call(student, `/conversations/${conversation}/messages?limit=2&before_id=${newest[0].id}`);
+  assert.deepEqual(older.map((m) => m.content), ['msg-2', 'msg-3']);
+  const readCursor = async () => (await db.prepare('SELECT last_read_message_id FROM conversation_reads WHERE conversation_id=? AND user_id=?').get(conversation, student))?.last_read_message_id;
+  assert.equal(await readCursor(), newest.at(-1).id);
+  await call(student, `/conversations/${conversation}/messages?limit=2&before_id=${newest[0].id}`);
+  assert.equal(await readCursor(), newest.at(-1).id, '加载历史页不应回退已读位置');
+  // Login failures are limited per IP after ten attempts.
+  for (let i = 0; i < 10; i++) await call(null, '/login', 'POST', { student_id: 'rate-limited-account', password: 'wrong' }, 401);
+  await call(null, '/login', 'POST', { student_id: 'rate-limited-account', password: 'wrong' }, 429);
   console.log(`PASS: ${checks} API checks; isolated database only.`);
 } finally {
   child.kill();if (child.exitCode === null) await once(child, 'exit');await fixture.close();

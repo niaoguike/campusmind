@@ -10,6 +10,7 @@
     "test:memory": "node --test tests/long-term-memory.mjs",
     "db:check": "node scripts/checkPostgres.mjs",
     "db:migrate": "node scripts/migrateDatabase.mjs",
+    "db:validate": "node scripts/validateConstraints.mjs",
     "db:import-sqlite": "node scripts/importSQLite.mjs",
     "db:backfill-summaries": "node scripts/backfillSummaries.mjs",
     "test:postgres": "node --test --test-concurrency=1 tests/long-term-memory.mjs tests/postgres-chat.mjs",

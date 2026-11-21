@@ -13,7 +13,7 @@ cp -n deploy/postgres/.env.example deploy/postgres/.env
 cp -n deploy/redis/.env.example deploy/redis/.env
 ```
 
-Set `JWT_SECRET`, `LLM_CONFIG_ENCRYPTION_KEY`, `POSTGRES_PASSWORD` and `REDIS_PASSWORD`. Use generated hexadecimal database/cache passwords for the Compose URL templates. For an upgrade, preserve the existing application secrets so saved model keys remain decryptable. Configure the optional embedding service in `server/.env` if cross-session semantic memory is needed.
+Set `JWT_SECRET`, `LLM_CONFIG_ENCRYPTION_KEY`, `POSTGRES_PASSWORD` and `REDIS_PASSWORD`. Use generated hexadecimal database/cache passwords for the Compose URL templates. For an upgrade, preserve the existing application secrets so saved model keys remain decryptable. Set `CORS_ORIGINS` to the public HTTPS origin (comma-separate multiple origins); the API refuses to start in production without the two application secrets. Configure the optional embedding service in `server/.env` if cross-session semantic memory is needed. `RESOURCE_INDEX_CONCURRENCY` (default 2) caps parallel document parsing.
 
 ```bash
 chmod +x deploy/server-setup.sh
@@ -40,9 +40,10 @@ docker compose --env-file deploy/postgres/.env --env-file deploy/redis/.env ps
 docker compose --env-file deploy/postgres/.env --env-file deploy/redis/.env logs -f api
 curl http://127.0.0.1:3001/api/health
 sudo nginx -t
+docker compose exec -T api npm run db:validate
 ```
 
-The health endpoint reports `database: postgresql`. API startup applies versioned SQL migrations before accepting requests. Back up PostgreSQL and uploads before upgrading. Existing migration files are checksum-protected; add a new migration rather than editing an applied file.
+The health endpoint reports `database: postgresql`. API startup applies versioned SQL migrations before accepting requests. Back up PostgreSQL and uploads before upgrading. Applied migration files are checksum-tracked: editing one warns and updates the recorded checksum, so prefer a new migration. The `db:validate` script promotes the `NOT VALID` foreign keys to fully validated once legacy orphan rows are cleaned up; it is safe to rerun.
 
 ## Backups and rollback
 
